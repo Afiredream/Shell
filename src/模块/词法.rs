@@ -142,21 +142,22 @@ impl<'a> 解析器<'a> {
     /// 把正在拼的词收进命令；命令名之前形如 `名称=值` 的词视为赋值前缀。
     fn 收集词(&mut self) {
         let 等号位置 = self.赋值等号位置.take();
-        let Some(正在拼的词) = self.当前词.take() else {
+        let Some(mut 正在拼的词) = self.当前词.take() else {
             return;
         };
-        if let Some(位置) = 等号位置.filter(|_| self.当前命令.词列表.is_empty()) {
-            let 名称 = &正在拼的词.文本[..位置];
-            let 名称合法 = !名称.is_empty()
-                && 名称.chars().next().is_some_and(|首字| 首字.is_alphabetic() || 首字 == '_')
-                && 名称.chars().all(|字符| 字符.is_alphanumeric() || 字符 == '_');
+        if let Some(位) = 等号位置.filter(|_| self.当前命令.词列表.is_empty()) {
+            // 注意：`位` 是「已打字数」（字符数），不是字节偏移；中文变量名必须按字节切片
+            let 名称字符: Vec<char> = 正在拼的词.文本.chars().take(位).collect();
+            let 名称合法 = 名称字符.first().is_some_and(|首字| 首字.is_alphabetic() || *首字 == '_')
+                && 名称字符
+                    .iter()
+                    .all(|字符| 字符.is_alphanumeric() || *字符 == '_');
             if 名称合法 {
-                let 值 = 词 {
-                    文本: 正在拼的词.文本[位置 + 1..].to_string(),
-                    含单引号: 正在拼的词.含单引号,
-                    含双引号: 正在拼的词.含双引号,
-                };
-                self.当前命令.赋值.push((名称.to_string(), 值));
+                // 去掉「名称 + 等号」那一段（按字符计，`位 + 1` 含 `=`）
+                let 等号之后: String = 正在拼的词.文本.chars().skip(位 + 1).collect();
+                正在拼的词.文本 = 等号之后;
+                let 名称: String = 名称字符.into_iter().collect();
+                self.当前命令.赋值.push((名称, 正在拼的词));
                 return;
             }
         }
@@ -668,6 +669,22 @@ mod 测试 {
         assert_eq!(第一条命令.赋值.len(), 2);
         assert_eq!(第一条命令.赋值[1].1.文本, "x y");
         assert_eq!(展开全部(第一条命令), ["echo", "hi"]);
+    }
+
+    #[test]
+    fn 中文变量赋值() {
+        // 等号位置按字符计，中文变量名过去会按字节切片而崩溃
+        let 作业列表 = 解析命令("名字=壳语言 echo $名字").unwrap();
+        let 第一条命令 = &作业列表[0].管道.命令[0];
+        assert_eq!(第一条命令.赋值.len(), 1);
+        assert_eq!(第一条命令.赋值[0].0, "名字");
+        assert_eq!(第一条命令.赋值[0].1.文本, "壳语言");
+        // 前置赋值只影响子进程：命令行里的 `$名字` 仍按展开时的环境解析
+        assert_eq!(展开全部(第一条命令), ["echo", "世界"]);
+
+        let 作业列表 = 解析命令("名=值").unwrap();
+        assert_eq!(作业列表[0].管道.命令[0].赋值[0].0, "名");
+        assert_eq!(作业列表[0].管道.命令[0].赋值[0].1.文本, "值");
     }
 
     #[test]
