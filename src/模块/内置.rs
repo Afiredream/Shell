@@ -1,57 +1,65 @@
 //! 内置命令：必须在 shell 自己进程里完成的命令。
 //!
-//! 内置命令直接读写 `std::io::stdin/stdout/stderr`。凡是带重定向或管道的内置命令，
-//! 释义层会先 `dup2` 把真实的 0/1/2 指到目标上，执行完再恢复 —— 这样内置命令
+//! 内置命令直接读写标准输入/输出/错误。带重定向的内置命令会由执行层先用
+//! 「重定向守护」把真实的 0/1/2 指到目标上，执行完再恢复 —— 这样内置命令
 //! 完全不需要关心自己是在终端、管道还是文件里。
+//!
+//! `内置命令` 的变体用中文命名；`全部` 表里的字符串才是用户在命令行里敲的名字。
 
 use std::io::{self, Write};
 
+use super::系统调用::整数;
+
+/// 内置命令执行时能看到的上下文。
 pub struct 上下文<'a> {
     pub 环境: &'a mut Vec<(String, String)>,
     /// 上一条命令的退出状态（`$?`）
-    pub 最后状态: i32,
+    pub 最后状态: 整数,
     /// 内置命令要求退出 shell 时置位
     pub 退出: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum 内置命令 {
-    Cd,
-    Pwd,
-    Exit,
-    Export,
-    Unset,
-    Env,
-    Echo,
-    Help,
-    True,
-    False,
+    切换目录,
+    打印目录,
+    退出,
+    导出变量,
+    取消变量,
+    列出环境,
+    回显,
+    显示帮助,
+    真,
+    假,
 }
 
 const 全部: &[(&str, 内置命令)] = &[
-    ("cd", 内置命令::Cd),
-    ("pwd", 内置命令::Pwd),
-    ("exit", 内置命令::Exit),
-    ("export", 内置命令::Export),
-    ("unset", 内置命令::Unset),
-    ("env", 内置命令::Env),
-    ("echo", 内置命令::Echo),
-    ("help", 内置命令::Help),
-    ("true", 内置命令::True),
-    ("false", 内置命令::False),
+    ("cd", 内置命令::切换目录),
+    ("pwd", 内置命令::打印目录),
+    ("exit", 内置命令::退出),
+    ("export", 内置命令::导出变量),
+    ("unset", 内置命令::取消变量),
+    ("env", 内置命令::列出环境),
+    ("echo", 内置命令::回显),
+    ("help", 内置命令::显示帮助),
+    ("true", 内置命令::真),
+    ("false", 内置命令::假),
 ];
 
-/// 按名字查内置命令。
-pub fn 查找(名称: &str) -> Option<&'static 内置命令> {
-    全部.iter().find(|(名, _)| *名 == 名称).map(|(_, 命令)| 命令)
+/// 按命令行里敲的名字查内置命令。
+pub fn 按名称查找(名称字符串: &str) -> Option<&'static 内置命令> {
+    全部
+        .iter()
+        .find(|(名字, _)| *名字 == 名称字符串)
+        .map(|(_, 命令)| 命令)
 }
 
 impl 内置命令 {
     /// 执行，返回退出状态。
-    pub fn 运行(&self, 参数: &[String], 上下文: &mut 上下文) -> i32 {
+    pub fn 运行(&self, 参数: &[String], 上下文: &mut 上下文) -> 整数 {
         match self {
-            Self::Cd => Self::切换目录(参数),
-            Self::Pwd => match std::env::current_dir() {
+            Self::切换目录 => Self::执行切换目录(参数),
+            Self::打印目录 => match std::env::current_dir() {
                 Ok(路径) => {
                     let _ = writeln!(io::stdout(), "{}", 路径.display());
                     0
@@ -61,53 +69,54 @@ impl 内置命令 {
                     1
                 }
             },
-            Self::Exit => {
+            Self::退出 => {
                 上下文.退出 = true;
-                参数.first().and_then(|s| s.parse().ok()).unwrap_or(上下文.最后状态)
+                let 参数里指定的码: Option<整数> = 参数.first().and_then(|文本| 文本.parse().ok());
+                参数里指定的码.unwrap_or(上下文.最后状态)
             }
-            Self::Export => Self::导出(参数, 上下文),
-            Self::Unset => {
-                上下文.环境.retain(|(k, _)| !参数.contains(k));
+            Self::导出变量 => Self::导出(参数, 上下文),
+            Self::取消变量 => {
+                上下文.环境.retain(|(键, _)| !参数.contains(键));
                 for 键 in 参数 {
                     std::env::remove_var(键);
                 }
                 0
             }
-            Self::Env => {
-                let mut 输出 = io::stdout().lock();
+            Self::列出环境 => {
+                let mut 输出端 = io::stdout().lock();
                 for (键, 值) in 上下文.环境.iter() {
-                    let _ = writeln!(输出, "{键}={值}");
+                    let _ = writeln!(输出端, "{键}={值}");
                 }
                 0
             }
-            Self::Echo => {
-                输出(参数);
+            Self::回显 => {
+                回显(参数);
                 0
             }
-            Self::Help => {
+            Self::显示帮助 => {
                 帮助();
                 0
             }
-            Self::True => 0,
-            Self::False => 1,
+            Self::真 => 0,
+            Self::假 => 1,
         }
     }
 
-    fn 切换目录(参数: &[String]) -> i32 {
+    fn 执行切换目录(参数: &[String]) -> 整数 {
         let 目标 = match 参数.first().map(String::as_str) {
             None | Some("") => match std::env::var("HOME") {
-                Ok(家) => 家,
+                Ok(家目录) => 家目录,
                 Err(_) => return 0,
             },
             Some("-") => std::env::var("OLDPWD").unwrap_or_else(|_| ".".into()),
-            Some(其他) => 其他.to_string(),
+            Some(其它) => 其它.to_string(),
         };
         let 旧目录 = std::env::current_dir().ok();
         match std::env::set_current_dir(&目标) {
             Ok(()) => {
                 if 参数.first().map(String::as_str) == Some("-") {
-                    if let Ok(现在) = std::env::current_dir() {
-                        println!("{}", 现在.display());
+                    if let Ok(现在目录) = std::env::current_dir() {
+                        println!("{}", 现在目录.display());
                     }
                 }
                 if let Some(旧) = 旧目录 {
@@ -122,12 +131,16 @@ impl 内置命令 {
         }
     }
 
-    fn 导出(参数: &[String], 上下文: &mut 上下文) -> i32 {
+    fn 导出(参数: &[String], 上下文: &mut 上下文) -> 整数 {
         if 参数.is_empty() {
-            let mut 列表: Vec<String> = 上下文.环境.iter().map(|(k, v)| format!("export {k}={v}")).collect();
+            let mut 列表: Vec<String> = 上下文
+                .环境
+                .iter()
+                .map(|(键, 值)| format!("export {键}={值}"))
+                .collect();
             列表.sort();
-            for 行 in 列表 {
-                println!("{行}");
+            for 每条 in 列表 {
+                println!("{每条}");
             }
             return 0;
         }
@@ -135,15 +148,15 @@ impl 内置命令 {
         for 项 in 参数 {
             match 项.split_once('=') {
                 Some((键, 值)) => {
-                    match 上下文.环境.iter_mut().find(|(k, _)| k == 键) {
+                    match 上下文.环境.iter_mut().find(|(已有键, _)| 已有键 == 键) {
                         Some((_, 旧值)) => *旧值 = 值.to_string(),
                         None => 上下文.环境.push((键.to_string(), 值.to_string())),
                     }
                     std::env::set_var(键, 值);
                 }
                 None => {
-                    // `export NAME`：不存在的变量只警告（与 bash 一致）
-                    if !上下文.环境.iter().any(|(k, _)| k == 项) {
+                    // `export 名称`：不存在的变量只警告（与 bash 一致）
+                    if !上下文.环境.iter().any(|(键, _)| 键 == 项) {
                         let _ = writeln!(io::stderr(), "export: {项}: 变量不存在");
                         状态 = 1;
                     }
@@ -154,53 +167,53 @@ impl 内置命令 {
     }
 }
 
-/// `echo` 支持 `-n`（结尾不换行）与 `-e`（解释 `\n` `\t` 等转义）。
-fn 输出(参数: &[String]) {
-    let mut 换行 = true;
-    let mut 转义 = false;
+/// 回显命令：支持 `-n`（结尾不换行）与 `-e`（解释 `\n` `\t` 等转义）。
+fn 回显(参数: &[String]) {
+    let mut 要换行 = true;
+    let mut 要转义 = false;
     let mut 起点 = 0;
     while let Some(选项) = 参数.get(起点) {
         match 选项.as_str() {
-            "-n" => 换行 = false,
-            "-e" => 转义 = true,
+            "-n" => 要换行 = false,
+            "-e" => 要转义 = true,
             "-ne" | "-en" => {
-                换行 = false;
-                转义 = true;
+                要换行 = false;
+                要转义 = true;
             }
             _ => break,
         }
         起点 += 1;
     }
     let mut 文本 = 参数[起点..].join(" ");
-    if 转义 {
+    if 要转义 {
         文本 = 解释转义(&文本);
     }
-    if 换行 {
+    if 要换行 {
         文本.push('\n');
     }
     let 标准输出 = io::stdout();
-    let mut 输出 = 标准输出.lock();
-    let _ = 输出.write_all(文本.as_bytes());
-    let _ = 输出.flush();
+    let mut 输出端 = 标准输出.lock();
+    let _ = 输出端.write_all(文本.as_bytes());
+    let _ = 输出端.flush();
 }
 
-fn 解释转义(s: &str) -> String {
-    let mut 结果 = String::with_capacity(s.len());
-    let mut 字符 = s.chars();
-    while let Some(c) = 字符.next() {
-        if c != '\\' {
-            结果.push(c);
+fn 解释转义(原文: &str) -> String {
+    let mut 结果 = String::with_capacity(原文.len());
+    let mut 字符迭代 = 原文.chars();
+    while let Some(字符) = 字符迭代.next() {
+        if 字符 != '\\' {
+            结果.push(字符);
             continue;
         }
-        match 字符.next() {
+        match 字符迭代.next() {
             Some('n') => 结果.push('\n'),
             Some('t') => 结果.push('\t'),
             Some('r') => 结果.push('\r'),
             Some('\\') => 结果.push('\\'),
             Some('e') => 结果.push('\x1b'),
-            Some(其他) => {
+            Some(其它) => {
                 结果.push('\\');
-                结果.push(其他);
+                结果.push(其它);
             }
             None => 结果.push('\\'),
         }
@@ -225,7 +238,7 @@ pub fn 帮助() {
   后台      cmd &               放到后台执行
   分隔      cmd1 ; cmd2          依次执行（换行同理）
   引号      单引号内原样；双引号内仅 $ 与 \ 可转义
-  展开      $名称 ${{名称}} ~/路径 * ? [abc] # 注释
+  展开      $名称 与 ${{名称}}、~/路径、* ? [abc]、# 注释
 
 内置命令：
   cd [目录]        切换目录（cd 回家，cd - 回上一次）
