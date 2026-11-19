@@ -1,0 +1,17 @@
+[package]
+name = "shell-lite"
+version = "0.1.0"
+edition = "2021"
+description = "极简 shell：内置命令 + 外部命令，支持管道、重定向、后台、环境变量与通配符"
+license = "MIT"
+
+[[bin]]
+name = "shell-lite"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 2
+strip = true
+lto = true
