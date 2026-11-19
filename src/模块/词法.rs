@@ -14,13 +14,29 @@
 use std::fmt;
 
 /// 一个词。引号只决定「怎么展开」，引号本身不会进入 `文本`。
+///
+/// `字面量区` 与 `文本` 按字符一一对应：为 `true` 的字符来自单引号内部，
+/// 展开时原样保留（不认 `$`、不认通配、不认首个 `~`）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct 词 {
     pub 文本: String,
-    /// 含有单引号内容：整词原样，不做任何展开
-    pub 含单引号: bool,
+    字面量区: Vec<bool>,
     /// 含有双引号内容：`$` 展开，但不做通配 / `~` 展开
     pub 含双引号: bool,
+}
+
+impl 词 {
+    /// 在词尾追加字符，`是否字面量` 表示它是否来自单引号内部。
+    fn 追加(&mut self, 字符: char, 是否字面量: bool) {
+        self.文本.push(字符);
+        self.字面量区.push(是否字面量);
+    }
+
+    /// 去掉前 `个数` 个字符（用于把 `名称=值` 拆成赋值）。
+    fn 去掉前若干字符(&mut self, 个数: usize) {
+        self.文本 = self.文本.chars().skip(个数).collect();
+        self.字面量区.drain(..个数.min(self.字面量区.len()));
+    }
 }
 
 /// 一个最简单的命令（可带前置变量赋值，如 `A=1 echo $A`）。
@@ -146,7 +162,7 @@ impl<'a> 解析器<'a> {
             return;
         };
         if let Some(位) = 等号位置.filter(|_| self.当前命令.词列表.is_empty()) {
-            // 注意：`位` 是「已打字数」（字符数），不是字节偏移；中文变量名必须按字节切片
+            // `位` 是「已打字数」（字符数），不是字节偏移；中文变量名必须按字符切分
             let 名称字符: Vec<char> = 正在拼的词.文本.chars().take(位).collect();
             let 名称合法 = 名称字符.first().is_some_and(|首字| 首字.is_alphabetic() || *首字 == '_')
                 && 名称字符
@@ -154,8 +170,7 @@ impl<'a> 解析器<'a> {
                     .all(|字符| 字符.is_alphanumeric() || *字符 == '_');
             if 名称合法 {
                 // 去掉「名称 + 等号」那一段（按字符计，`位 + 1` 含 `=`）
-                let 等号之后: String = 正在拼的词.文本.chars().skip(位 + 1).collect();
-                正在拼的词.文本 = 等号之后;
+                正在拼的词.去掉前若干字符(位 + 1);
                 let 名称: String = 名称字符.into_iter().collect();
                 self.当前命令.赋值.push((名称, 正在拼的词));
                 return;
@@ -192,60 +207,59 @@ impl<'a> 解析器<'a> {
         while self.预看(0).is_some_and(是空白) {
             self.当前位置 += 1;
         }
-        let mut 文本 = String::new();
-        let mut 含单引号 = false;
-        let mut 含双引号 = false;
+        let mut 目标 = 词::default();
         while let Some(字符) = self.预看(0) {
             if 是空白(字符) || 是操作符(字符) {
                 break;
             }
+            self.当前位置 += 1;
             match 字符 {
                 '\\' => {
-                    self.当前位置 += 1;
                     let Some(下一个) = self.预看(0) else {
                         return Err(语法错误::反斜杠在行尾);
                     };
-                    文本.push(下一个);
-                    含单引号 = true;
+                    self.当前位置 += 1;
+                    目标.追加(下一个, true);
                 }
                 '\'' | '"' => {
-                    let 引号 = 字符;
-                    self.当前位置 += 1;
+                    let 来自单引号 = 字符 == '\'';
                     let mut 已闭合 = false;
-                    while let Some(字符) = self.预看(0) {
+                    while let Some(内部字符) = self.预看(0) {
                         self.当前位置 += 1;
-                        if 字符 == 引号 {
+                        if 内部字符 == 字符 {
                             已闭合 = true;
                             break;
                         }
-                        if 引号 == '"' && 字符 == '\\' {
-                            if let Some(下一个) = self.预看(0) {
-                                self.当前位置 += 1;
-                                文本.push(下一个);
-                                continue;
-                            }
+                        // 单引号内只认 `\'`，双引号内 `\x` 一律保留下一字符
+                        if 内部字符 == '\\' && self.预看(0).is_some_and(|下个| 来自单引号 && 下个 == '\'') {
+                            self.当前位置 += 1;
+                            目标.追加('\'', true);
+                            continue;
                         }
-                        文本.push(字符);
+                        if 内部字符 == '\\' && !来自单引号 {
+                            let Some(下一个) = self.预看(0) else {
+                                return Err(语法错误::反斜杠在行尾);
+                            };
+                            self.当前位置 += 1;
+                            目标.追加(下一个, false);
+                            continue;
+                        }
+                        目标.追加(内部字符, 来自单引号);
                     }
                     if !已闭合 {
-                        return Err(语法错误::引号未闭合(引号));
+                        return Err(语法错误::引号未闭合(字符));
                     }
-                    if 引号 == '\'' {
-                        含单引号 = true;
-                    } else {
-                        含双引号 = true;
+                    if !来自单引号 {
+                        目标.含双引号 = true;
                     }
                 }
-                _ => {
-                    文本.push(字符);
-                    self.当前位置 += 1;
-                }
+                _ => 目标.追加(字符, false),
             }
         }
-        if 文本.is_empty() {
+        if 目标.文本.is_empty() {
             return Err(语法错误::重定向缺少目标);
         }
-        Ok(词 { 文本, 含单引号, 含双引号 })
+        Ok(目标)
     }
 
     fn 运行(&mut self) -> Result<(), 语法错误> {
@@ -257,7 +271,7 @@ impl<'a> 解析器<'a> {
                         None => return Err(语法错误::反斜杠在行尾),
                         Some('\n') => self.当前位置 += 1,
                         Some(下一个) => {
-                            self.取当前词().文本.push(下一个);
+                            self.取当前词().追加(下一个, false);
                             self.当前位置 += 1;
                         }
                     }
@@ -373,66 +387,76 @@ impl<'a> 解析器<'a> {
 
     fn 读引号(&mut self, 引号: char) -> Result<(), 语法错误> {
         self.当前位置 += 1;
-        while let Some(字符) = self.预看(0) {
+        let 来自单引号 = 引号 == '\'';
+        while let Some(当前字符) = self.预看(0) {
             self.当前位置 += 1;
-            if 字符 == 引号 {
-                let 当前词 = self.取当前词();
-                if 引号 == '\'' {
-                    当前词.含单引号 = true;
-                } else {
-                    当前词.含双引号 = true;
+            if 当前字符 == 引号 {
+                if 引号 == '"' {
+                    self.取当前词().含双引号 = true;
                 }
                 return Ok(());
             }
-            if 引号 == '"' && 字符 == '\\' {
+            // 单引号内只认 `\'`（与 bash 一致）；双引号内只认 `$` ` \` 四个字符
+            if 当前字符 == '\\' {
                 match self.预看(0) {
-                    Some(下一个 @ ('$' | '`' | '"' | '\\')) => {
+                    Some(下一个) if 来自单引号 && 下一个 == '\'' => {
                         self.当前位置 += 1;
-                        self.取当前词().文本.push(下一个);
+                        self.取当前词().追加('\'', true);
+                        continue;
                     }
-                    Some('\n') => self.当前位置 += 1,
-                    Some(其它) => self.保留反斜杠(其它),
+                    Some(下一个 @ ('$' | '`' | '"' | '\\')) if !来自单引号 => {
+                        self.当前位置 += 1;
+                        self.取当前词().追加(下一个, false);
+                        continue;
+                    }
+                    Some('\n') => {
+                        self.当前位置 += 1;
+                        continue;
+                    }
+                    Some(其它) if !来自单引号 => {
+                        let 当前词 = self.取当前词();
+                        当前词.追加('\\', false);
+                        当前词.追加(其它, false);
+                        self.当前位置 += 1;
+                        continue;
+                    }
+                    Some(其它) => {
+                        // 单引号内 `\` 后跟非 `'`：反斜杠是字面量
+                        self.取当前词().追加('\\', true);
+                        let _ = 其它;
+                        continue;
+                    }
                     None => return Err(语法错误::反斜杠在行尾),
                 }
-                continue;
             }
-            self.取当前词().文本.push(字符);
+            self.取当前词().追加(当前字符, 来自单引号);
         }
         Err(语法错误::引号未闭合(引号))
     }
 
-    /// 双引号内，`\` 后跟非特殊字符时，反斜杠本身要保留。
-    fn 保留反斜杠(&mut self, 字符: char) {
-        let 当前词 = self.取当前词();
-        当前词.文本.push('\\');
-        当前词.文本.push(字符);
-    }
 }
 
 /// 执行前的展开：`~`、`$变量`、`${变量}` 与通配符。
-/// 有双引号的词只展开变量、不展开通配与 `~`；有单引号的词原样保留。
-/// `查变量` 用于解析变量与 `$HOME`。
+///
+/// - 单引号内的字符是字面量：不展开 `$`，也不通配；
+/// - 含有双引号的词只展开变量，不做通配与 `~`；
+/// - `查变量` 用于解析变量与 `$HOME`。
 pub fn 展开词(单字: &词, 查变量: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
     let 文本 = 展开变量(单字, 查变量);
-    if !单字.含单引号 && !单字.含双引号 {
-        if let Some(匹配列表) = 通配展开(&文本) {
-            return 匹配列表;
-        }
+    if let Some(匹配列表) = 通配展开(单字, &文本) {
+        return 匹配列表;
     }
     vec![文本]
 }
 
 /// 变量与 `~` 展开（不做通配）。
 pub fn 展开变量(单字: &词, 查变量: &dyn Fn(&str) -> Option<String>) -> String {
-    if 单字.含单引号 {
-        // 引号里的 `$` 不展开，原样交给程序
-        return 单字.文本.clone();
-    }
     let 字符表: Vec<char> = 单字.文本.chars().collect();
     let mut 结果 = String::new();
     let mut 游标 = 0;
     while 游标 < 字符表.len() {
-        if 字符表[游标] != '$' {
+        let 是字面量 = 单字.字面量区.get(游标).copied().unwrap_or(false);
+        if 字符表[游标] != '$' || 是字面量 {
             结果.push(字符表[游标]);
             游标 += 1;
             continue;
@@ -447,6 +471,7 @@ pub fn 展开变量(单字: &词, 查变量: &dyn Fn(&str) -> Option<String>) ->
                         结果.push_str(&查变量(&名称).unwrap_or_default());
                         游标 = 名称起点 + 偏移 + 1;
                     }
+                    // 没有闭合的 `}`：`$` 当字面量
                     None => {
                         结果.push('$');
                         游标 += 1;
@@ -472,8 +497,10 @@ pub fn 展开变量(单字: &词, 查变量: &dyn Fn(&str) -> Option<String>) ->
             }
         }
     }
-    // `~` 只在词首、且没有引号时展开
-    if !单字.含单引号 && !单字.含双引号 {
+
+    // `~` 只在词首、位于单引号/转义之外、且词里没有双引号时展开
+    let 首字是字面量 = 单字.字面量区.first().copied().unwrap_or(false);
+    if !首字是字面量 && !单字.含双引号 {
         if let Some(家目录) = 查变量("HOME") {
             if 结果 == "~" {
                 return 家目录;
@@ -487,8 +514,21 @@ pub fn 展开变量(单字: &词, 查变量: &dyn Fn(&str) -> Option<String>) ->
 }
 
 /// 通配符展开；没有匹配项时返回 None（保留原样）。
-pub fn 通配展开(模式: &str) -> Option<Vec<String>> {
-    if !模式.contains(['*', '?', '[']) {
+///
+/// 只有词里**原样写出**的 `*`、`?`、`[` 才触发通配：单引号/转义得到的、
+/// 以及变量展开出来的内容都原样交给程序。
+pub fn 通配展开(单字: &词, 模式: &str) -> Option<Vec<String>> {
+    if 单字.含双引号 {
+        return None;
+    }
+    let 展开后字符: Vec<char> = 模式.chars().collect();
+    let 有原样通配符 = |序号: usize| {
+        let 是字面量 = 单字.字面量区.get(序号).copied().unwrap_or(false);
+        !是字面量 && matches!(展开后字符[序号], '*' | '?' | '[')
+    };
+    let 有原样通配 = 单字.文本.chars().count() == 展开后字符.len()
+        && (0..展开后字符.len()).any(有原样通配符);
+    if !有原样通配 {
         return None;
     }
     let (目录部分, 文件名模式) = match 模式.rfind('/') {
@@ -669,6 +709,34 @@ mod 测试 {
         assert_eq!(第一条命令.赋值.len(), 2);
         assert_eq!(第一条命令.赋值[1].1.文本, "x y");
         assert_eq!(展开全部(第一条命令), ["echo", "hi"]);
+    }
+
+    #[test]
+    fn 单引号段按字面量处理() {
+        // 只有单引号段受限，后面的裸 `$` 照常展开（与 bash 一致）
+        let 作业列表 = 解析命令(r#"echo 'A'"$名字""#).unwrap();
+        assert_eq!(展开全部(&作业列表[0].管道.命令[0]), ["echo", "A世界"]);
+
+        let 作业列表 = 解析命令(r"echo 'a\'b'").unwrap();
+        assert_eq!(展开全部(&作业列表[0].管道.命令[0]), ["echo", "a'b"]);
+
+        // 双引号里 `\` 可转义 `"`，但 `\t` 保持字面
+        let 作业列表 = 解析命令(r#"echo "x\"y" "a\tb""#).unwrap();
+        assert_eq!(展开全部(&作业列表[0].管道.命令[0]), ["echo", "x\"y", r"a\tb"]);
+
+        // 单个 `~` 只有不被引号包住才展开
+        let 作业列表 = 解析命令(r#"echo ~ '~'"#).unwrap();
+        assert_eq!(展开全部(&作业列表[0].管道.命令[0]), ["echo", "/home/u", "~"]);
+    }
+
+    #[test]
+    fn 井号紧跟引号内容() {
+        // 引号里的 `#` 属于词本身；引号后面紧跟着的 `#` 也是同一个词的一部分
+        let 作业列表 = 解析命令(r"echo '#'").unwrap();
+        assert_eq!(展开全部(&作业列表[0].管道.命令[0]), ["echo", "#"]);
+
+        let 作业列表 = 解析命令(r"echo prev'#'后").unwrap();
+        assert_eq!(展开全部(&作业列表[0].管道.命令[0]), ["echo", "prev#后"]);
     }
 
     #[test]

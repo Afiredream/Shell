@@ -14,7 +14,7 @@ user@host:~$ echo 追加 >> 笔记.txt &
 [4242] 已放入后台
 ```
 
-> **文档**：[文档索引](文档/README.md) · [使用手册](文档/使用手册.md) · [实现说明](文档/实现说明.md) · [测试与排错](文档/测试与排错.md)
+> **文档**：[文档索引](文档/README.md) · [使用手册](文档/使用手册.md) · [语法参考](文档/语法参考.md) · [实现说明](文档/实现说明.md) · [测试与排错](文档/测试与排错.md)
 
 ## 支持的功能
 
@@ -88,7 +88,7 @@ src/
 
 ```sh
 cargo build --release          # 产物：target/release/shell-lite
-cargo test                     # 词法、展开、引号的单元测试（13 项）
+cargo test                     # 词法、展开、引号的单元测试（15 项）
 cargo clippy                   # 静态检查（0 警告）
 cargo run                      # 交互模式（提示符需要真实终端）
 cargo run -- -c 'ls | wc -l'   # 执行一条命令
