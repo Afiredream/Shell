@@ -7,11 +7,11 @@
 
 use std::collections::HashMap;
 
-use super::执行::{self, 重定向守护, 管道片段};
-use super::系统::整数;
-use super::释义::{释义, 释义器};
 use super::内置;
+use super::执行::{self, 管道片段, 重定向守护};
+use super::系统::整数;
 use super::词法;
+use super::释义::{释义, 释义器};
 
 pub struct 壳 {
     pub 变量: HashMap<String, String>,
@@ -29,7 +29,12 @@ impl 壳 {
                 .map(|路径| 路径.display().to_string())
                 .unwrap_or_default()
         });
-        Self { 变量, 最后状态: 0, 退出: false, 退出码: 0 }
+        Self {
+            变量,
+            最后状态: 0,
+            退出: false,
+            退出码: 0,
+        }
     }
 
     /// 启动时读取 `~/.壳语言rc`（存在才读），用来设置变量、导出环境等。
@@ -92,7 +97,10 @@ impl 壳 {
                 break;
             }
             let 环境快照 = self.变量快照();
-            let 释义器 = 释义器 { 环境表: &环境快照, 最后状态: self.最后状态 };
+            let 释义器 = 释义器 {
+                环境表: &环境快照,
+                最后状态: self.最后状态,
+            };
             match 释义器.释义(待执行作业) {
                 Err(消息) => {
                     eprintln!("壳语言：{消息}");
@@ -169,7 +177,10 @@ impl 壳 {
     }
 
     fn 变量快照(&self) -> Vec<(String, String)> {
-        self.变量.iter().map(|(键, 值)| (键.clone(), 值.clone())).collect()
+        self.变量
+            .iter()
+            .map(|(键, 值)| (键.clone(), 值.clone()))
+            .collect()
     }
 
     /// 用当前变量表重建进程环境（`unset` 掉的名字要真的消失）。

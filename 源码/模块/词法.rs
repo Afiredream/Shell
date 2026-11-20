@@ -109,6 +109,25 @@ impl fmt::Display for 语法错误 {
     }
 }
 
+/// 变量名里允许的字符：字母、数字、`_`；中文等东亚文字的标点（。，、；：“演员” 等）不在此列。
+fn 是名称字符(字符: char) -> bool {
+    if 字符 == '_' {
+        return true;
+    }
+    字符.is_alphanumeric() && !是中文标点(字符)
+}
+
+fn 是中文标点(字符: char) -> bool {
+    matches!(
+        字符,
+        '\u{3000}'..='\u{303F}'   // CJK 符号和标点：。、《》「」【】…
+        | '\u{FF00}'..='\u{FF0F}' // 全角标点（不含 0-9 A-Z a-z 区间）
+        | '\u{FF1A}'..='\u{FF20}'
+        | '\u{FF3B}'..='\u{FF40}'
+        | '\u{FF5B}'..='\u{FF65}'
+    )
+}
+
 fn 是空白(字符: char) -> bool {
     字符 == ' ' || 字符 == '\t' || 字符 == '\r' || 字符 == '\n'
 }
@@ -164,7 +183,9 @@ impl<'a> 解析器<'a> {
         if let Some(位) = 等号位置.filter(|_| self.当前命令.词列表.is_empty()) {
             // `位` 是「已打字数」（字符数），不是字节偏移；中文变量名必须按字符切分
             let 名称字符: Vec<char> = 正在拼的词.文本.chars().take(位).collect();
-            let 名称合法 = 名称字符.first().is_some_and(|首字| 首字.is_alphabetic() || *首字 == '_')
+            let 名称合法 = 名称字符
+                .first()
+                .is_some_and(|首字| 首字.is_alphabetic() || *首字 == '_')
                 && 名称字符
                     .iter()
                     .all(|字符| 字符.is_alphanumeric() || *字符 == '_');
@@ -190,7 +211,8 @@ impl<'a> 解析器<'a> {
     /// 结束当前作业并压入结果；`|` 之后没有命令时报「缺少命令」。
     fn 结束作业(&mut self) -> Result<(), 语法错误> {
         self.结束命令();
-        if self.当前管道.命令.len() <= self.当前管道.连接.len() && !self.当前管道.命令.is_empty() {
+        if self.当前管道.命令.len() <= self.当前管道.连接.len() && !self.当前管道.命令.is_empty()
+        {
             self.当前管道 = 管道::default();
             return Err(语法错误::缺少命令);
         }
@@ -340,7 +362,10 @@ impl<'a> 解析器<'a> {
                 '(' | ')' => return Err(语法错误::意外符号(字符.to_string())),
                 _ => {
                     if 字符 == '=' && self.赋值等号位置.is_none() {
-                        let 已打字数 = self.当前词.as_ref().map_or(0, |单字| 单字.文本.chars().count());
+                        let 已打字数 = self
+                            .当前词
+                            .as_ref()
+                            .map_or(0, |单字| 单字.文本.chars().count());
                         self.赋值等号位置 = Some(已打字数);
                     }
                     self.取当前词().文本.push(字符);
@@ -437,7 +462,6 @@ impl<'a> 解析器<'a> {
         }
         Err(语法错误::引号未闭合(引号))
     }
-
 }
 
 /// 执行前的展开：`~`、`$变量`、`${变量}` 与通配符。
@@ -483,12 +507,12 @@ pub fn 展开变量(单字: &词, 查变量: &dyn Fn(&str) -> Option<String>) ->
                 }
             }
             // `$名称`
-            Some(&首字) if 首字.is_alphanumeric() || 首字 == '_' => {
+            Some(&首字) if 是名称字符(首字) => {
                 let 名称起点 = 游标 + 1;
                 let mut 名称终点 = 名称起点;
-                while 名称终点 < 字符表.len()
-                    && (字符表[名称终点].is_alphanumeric() || 字符表[名称终点] == '_')
-                {
+                // 名字里可以包含中文（`$名称`），但遇到 ASCII 标点（中文句号、逗号等）就结束，
+                // 这样 `你好$名字。` 能把句号留给正文
+                while 名称终点 < 字符表.len() && 是名称字符(字符表[名称终点]) {
                     名称终点 += 1;
                 }
                 let 名称: String = 字符表[名称起点..名称终点].iter().collect();
@@ -530,8 +554,8 @@ pub fn 通配展开(单字: &词, 模式: &str) -> Option<Vec<String>> {
         let 是字面量 = 单字.字面量区.get(序号).copied().unwrap_or(false);
         !是字面量 && matches!(展开后字符[序号], '*' | '?' | '[')
     };
-    let 有原样通配 = 单字.文本.chars().count() == 展开后字符.len()
-        && (0..展开后字符.len()).any(有原样通配符);
+    let 有原样通配 =
+        单字.文本.chars().count() == 展开后字符.len() && (0..展开后字符.len()).any(有原样通配符);
     if !有原样通配 {
         return None;
     }
@@ -539,7 +563,11 @@ pub fn 通配展开(单字: &词, 模式: &str) -> Option<Vec<String>> {
         Some(位置) => (&模式[..=位置], &模式[位置 + 1..]),
         None => ("", 模式),
     };
-    let 要读的目录 = if 目录部分.is_empty() { "." } else { 目录部分 };
+    let 要读的目录 = if 目录部分.is_empty() {
+        "."
+    } else {
+        目录部分
+    };
     let mut 匹配列表: Vec<String> = std::fs::read_dir(要读的目录)
         .ok()?
         .flatten()
@@ -726,11 +754,17 @@ mod 测试 {
 
         // 双引号里 `\` 可转义 `"`，但 `\t` 保持字面
         let 作业列表 = 解析命令(r#"echo "x\"y" "a\tb""#).unwrap();
-        assert_eq!(展开全部(&作业列表[0].管道.命令[0]), ["echo", "x\"y", r"a\tb"]);
+        assert_eq!(
+            展开全部(&作业列表[0].管道.命令[0]),
+            ["echo", "x\"y", r"a\tb"]
+        );
 
         // 单个 `~` 只有不被引号包住才展开
         let 作业列表 = 解析命令(r#"echo ~ '~'"#).unwrap();
-        assert_eq!(展开全部(&作业列表[0].管道.命令[0]), ["echo", "/home/u", "~"]);
+        assert_eq!(
+            展开全部(&作业列表[0].管道.命令[0]),
+            ["echo", "/home/u", "~"]
+        );
     }
 
     #[test]
@@ -761,8 +795,14 @@ mod 测试 {
 
     #[test]
     fn 引号未闭合() {
-        assert_eq!(解析命令("echo 'abc").unwrap_err(), 语法错误::引号未闭合('\''));
-        assert_eq!(解析命令("echo \"abc").unwrap_err(), 语法错误::引号未闭合('"'));
+        assert_eq!(
+            解析命令("echo 'abc").unwrap_err(),
+            语法错误::引号未闭合('\'')
+        );
+        assert_eq!(
+            解析命令("echo \"abc").unwrap_err(),
+            语法错误::引号未闭合('"')
+        );
     }
 
     #[test]
@@ -799,7 +839,11 @@ mod 测试 {
             ("echo x > a.txt\r\nls", "a.txt"),
         ] {
             let 作业列表 = 解析命令(输入).unwrap();
-            assert_eq!(作业列表[0].输出.as_ref().unwrap().0.文本, 期望, "输入：{输入}");
+            assert_eq!(
+                作业列表[0].输出.as_ref().unwrap().0.文本,
+                期望,
+                "输入：{输入}"
+            );
         }
         assert_eq!(解析命令("echo x > a.txt\r\nls").unwrap().len(), 2);
     }

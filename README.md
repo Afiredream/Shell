@@ -31,7 +31,7 @@ user@host:~$ echo 追加 >> 笔记.txt &
 | 注释 | `#` 到行尾 |
 | 启动文件 | `~/.壳语言rc` 逐行执行 |
 
-内置命令：`cd`（支持 `cd -`）、`pwd`、`export`、`unset`、`env`、`echo [-n] [-e]`、
+内置命令：`cd`（支持 `cd -`）、`pwd`、`环境变量`、`unset`、`echo [-n] [-e]`、
 `help`、`true`、`false`、`exit [码]`。
 
 ## 目录约定
@@ -92,7 +92,7 @@ user@host:~$ echo 追加 >> 笔记.txt &
   SIGTTIN 挂起。
 - **信号与终端**：shell 先把 SIGINT 设为忽略再 fork，避免 `Command` 的 fork→exec
   窗口被 Ctrl-C 打断；子进程 exec 前恢复默认处理。
-- **内置命令也能进管道**：单独出现时在 shell 进程执行（`cd`、`export` 生效）；
+- **内置命令也能进管道**：单独出现时在 shell 进程执行（`cd`、`环境变量` 生效）；
   出现在管道/后台时由子进程执行，不会污染父 shell。
 
 ## 构建与测试

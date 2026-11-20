@@ -11,9 +11,9 @@ use std::ffi::CString;
 use std::fmt;
 use std::process::{Command, ExitStatus};
 
+use super::内置;
 use super::系统;
 use super::系统::整数;
-use super::内置;
 
 // 标准流的描述符编号
 const 标准输入: 整数 = 0;
@@ -73,8 +73,14 @@ impl 管道片段 {
 pub enum 执行错误 {
     无法创建管道(std::io::Error),
     无法复制描述符(std::io::Error),
-    无法打开文件 { 路径: String, 原因: std::io::Error },
-    无法执行 { 程序: String, 原因: std::io::Error },
+    无法打开文件 {
+        路径: String,
+        原因: std::io::Error,
+    },
+    无法执行 {
+        程序: String,
+        原因: std::io::Error,
+    },
     无法等待进程(std::io::Error),
     子进程创建失败,
 }
@@ -104,9 +110,10 @@ pub fn 运行单个(命令: &简易命令) -> Result<整数, 执行错误> {
     for (键, 值) in &命令.环境 {
         子进程.env(键, 值);
     }
-    let 输出状态 = 子进程
-        .status()
-        .map_err(|原因| 执行错误::无法执行 { 程序: 程序名, 原因 })?;
+    let 输出状态 =
+        子进程.status().map_err(|原因| 执行错误::无法执行 {
+            程序: 程序名, 原因
+        })?;
     Ok(状态码(输出状态))
 }
 
@@ -146,7 +153,9 @@ pub fn 运行管道(片段: &管道片段) -> Result<整数, 执行错误> {
     for _ in 0..数量.saturating_sub(1) {
         let mut 描述符对: [整数; 2] = [0, 0];
         if 系统::创建管道(描述符对.as_mut_ptr()) != 0 {
-            return Err(执行错误::无法创建管道(std::io::Error::last_os_error()));
+            return Err(执行错误::无法创建管道(
+                std::io::Error::last_os_error(),
+            ));
         }
         管道表.push(描述符对);
     }
@@ -267,7 +276,11 @@ fn 换成新程序(命令: &简易命令) -> ! {
         let mut 环境表: Vec<(String, String)> = std::env::vars().collect();
         let 状态 = 内置命令.运行(
             &命令.参数列表[1..],
-            &mut 内置::上下文 { 环境: &mut 环境表, 最后状态: 0, 退出: false },
+            &mut 内置::上下文 {
+                环境: &mut 环境表,
+                最后状态: 0,
+                退出: false,
+            },
         );
         系统::立即退出(状态);
     }
@@ -292,15 +305,25 @@ fn 换成新程序(命令: &简易命令) -> ! {
         _ => format!("壳: {程序名}: {原因}\n"),
     };
     写标准错误(&提示);
-    let 退出码 = if 原因.kind() == std::io::ErrorKind::NotFound { 127 } else { 126 };
+    let 退出码 = if 原因.kind() == std::io::ErrorKind::NotFound {
+        127
+    } else {
+        126
+    };
     系统::立即退出(退出码);
 }
 
 /// 等一个子进程，返回 `(状态码, 终止信号)`；被 Ctrl-Z 暂停时信号位为 `None`。
 /// 后台作业不跟踪 Ctrl-Z（`WUNTRACED`），否则 shell 会误以为对方已经结束。
-fn 等待进程(进程号: 整数, 跟踪暂停: bool) -> Result<(整数, Option<整数>), 执行错误> {
+fn 等待进程(
+    进程号: 整数, 跟踪暂停: bool
+) -> Result<(整数, Option<整数>), 执行错误> {
     let mut 原始状态: 整数 = 0;
-    let 选项 = if 跟踪暂停 { 系统::也报告暂停 } else { 0 };
+    let 选项 = if 跟踪暂停 {
+        系统::也报告暂停
+    } else {
+        0
+    };
     loop {
         let 结果 = 系统::等待进程(进程号, &mut 原始状态, 选项);
         if 结果 == 进程号 {
@@ -332,15 +355,17 @@ fn 解码状态(原始状态: 整数) -> (整数, Option<整数>) {
 
 /// 第 `打断位置` 段是被信号杀掉的（多半是 SIGPIPE：下游已经读完并关闭了管道）。
 /// 继续等下游各段，再给上游残留的进程补一刀，最后返回最后一段的状态。
-fn 收尾(状态: 整数, 打断位置: usize, 子进程号: &[整数]) -> Result<整数, 执行错误> {
+fn 收尾(
+    状态: 整数, 打断位置: usize, 子进程号: &[整数]
+) -> Result<整数, 执行错误> {
     let mut 状态 = 状态;
     for &进程号 in &子进程号[打断位置 + 1..] {
         状态 = 等待进程(进程号, true)?.0;
     }
     for &进程号 in 子进程号 {
         let mut 原始状态 = 0;
-            系统::发送信号(进程号, 系统::终止信号);
-            系统::等待进程(进程号, &mut 原始状态, 系统::不阻塞);
+        系统::发送信号(进程号, 系统::终止信号);
+        系统::等待进程(进程号, &mut 原始状态, 系统::不阻塞);
     }
     Ok(状态)
 }
@@ -356,7 +381,9 @@ pub struct 重定向守护 {
 
 impl 重定向守护 {
     pub fn 应用(重定向: &重定向) -> Result<Self, 执行错误> {
-        let mut 守护 = Self { 备份表: Vec::new() };
+        let mut 守护 = Self {
+            备份表: Vec::new()
+        };
         (|| -> Result<(), 执行错误> {
             let mut 待改: Vec<(整数, 整数)> = Vec::new();
             if let Some(路径) = 重定向.输入.as_deref() {
@@ -372,14 +399,18 @@ impl 重定向守护 {
                 守护.备份表.push((目标, 系统::复制描述符(目标)));
                 if 系统::重定向描述符(描述符, 目标) < 0 {
                     系统::关闭描述符(描述符);
-                    return Err(执行错误::无法复制描述符(std::io::Error::last_os_error()));
+                    return Err(执行错误::无法复制描述符(
+                        std::io::Error::last_os_error(),
+                    ));
                 }
                 系统::关闭描述符(描述符);
             }
             if 重定向.合并错误 && 重定向.错误输出.is_none() {
                 守护.备份表.push((标准错误, 系统::复制描述符(标准错误)));
                 if 系统::重定向描述符(标准输出, 标准错误) < 0 {
-                    return Err(执行错误::无法复制描述符(std::io::Error::last_os_error()));
+                    return Err(执行错误::无法复制描述符(
+                        std::io::Error::last_os_error(),
+                    ));
                 }
             }
             Ok(())
@@ -412,14 +443,20 @@ fn 接到标准流(目标: 整数, 来源: 整数) -> Result<(), 执行错误> {
         return Ok(());
     }
     if 系统::重定向描述符(来源, 目标) < 0 {
-        return Err(执行错误::无法复制描述符(std::io::Error::last_os_error()));
+        return Err(执行错误::无法复制描述符(
+            std::io::Error::last_os_error(),
+        ));
     }
     Ok(())
 }
 
 /// 以写方式打开重定向目标（不存在则创建）。
 fn 打开写(路径: &str, 追加: bool) -> Result<整数, 执行错误> {
-    let 附加标志 = if 追加 { 系统::O_APPEND } else { 系统::O_TRUNC };
+    let 附加标志 = if 追加 {
+        系统::O_APPEND
+    } else {
+        系统::O_TRUNC
+    };
     打开(路径, 系统::O_WRONLY | 系统::O_CREAT | 附加标志, true)
 }
 
@@ -429,7 +466,10 @@ fn 打开读(路径: &str) -> Result<整数, 执行错误> {
 }
 
 fn 打开(路径: &str, 标志: 整数, 需要模式: bool) -> Result<整数, 执行错误> {
-    let 构造错误 = |原因| 执行错误::无法打开文件 { 路径: 路径.to_string(), 原因 };
+    let 构造错误 = |原因| 执行错误::无法打开文件 {
+        路径: 路径.to_string(),
+        原因,
+    };
     let 路径字符串 = CString::new(路径)
         .map_err(|_| 构造错误(std::io::Error::from_raw_os_error(系统::EINVAL)))?;
     let 描述符 = {

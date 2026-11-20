@@ -19,27 +19,46 @@ pub struct 上下文<'a> {
     pub 退出: bool,
 }
 
+impl 上下文<'_> {
+    /// 设置（或新增）一个变量：变量表与进程环境同步更新。
+    fn 设置变量(&mut self, 名称: &str, 数据: &str) {
+        match self.环境.iter_mut().find(|(已有名称, _)| 已有名称 == 名称) {
+            Some((_, 旧值)) => *旧值 = 数据.to_string(),
+            None => self.环境.push((名称.to_string(), 数据.to_string())),
+        }
+        std::env::set_var(名称, 数据);
+    }
+
+    fn 删除变量(&mut self, 名称: &str) {
+        self.环境.retain(|(已有名称, _)| 已有名称 != 名称);
+        std::env::remove_var(名称);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum 内置命令 {
     切换目录,
     打印目录,
     退出,
-    导出变量,
-    取消变量,
-    列出环境,
+    读取变量,
+    删除变量,
     回显,
     显示帮助,
     真,
     假,
+    处理环境变量,
 }
 
+/// 关键字 → 内置命令。`环境变量` 是正式名字，`export`/`env`/`unset` 保留为旧名，
+/// 老脚本和习惯 bash 的人不用改。
 const 全部: &[(&str, 内置命令)] = &[
     ("cd", 内置命令::切换目录),
     ("pwd", 内置命令::打印目录),
     ("exit", 内置命令::退出),
-    ("export", 内置命令::导出变量),
-    ("unset", 内置命令::取消变量),
-    ("env", 内置命令::列出环境),
+    ("环境变量", 内置命令::处理环境变量),
+    ("export", 内置命令::处理环境变量), // 旧名保留，便于迁移
+    ("env", 内置命令::读取变量),
+    ("unset", 内置命令::删除变量),
     ("echo", 内置命令::回显),
     ("help", 内置命令::显示帮助),
     ("true", 内置命令::真),
@@ -58,6 +77,8 @@ impl 内置命令 {
     /// 执行，返回退出状态。
     pub fn 运行(&self, 参数: &[String], 上下文: &mut 上下文) -> 整数 {
         match self {
+            // `环境变量` 既负责列出，也负责设置
+            Self::处理环境变量 => Self::执行环境变量(参数, 上下文),
             Self::切换目录 => Self::执行切换目录(参数),
             Self::打印目录 => match std::env::current_dir() {
                 Ok(路径) => {
@@ -74,19 +95,14 @@ impl 内置命令 {
                 let 参数里指定的码: Option<整数> = 参数.first().and_then(|文本| 文本.parse().ok());
                 参数里指定的码.unwrap_or(上下文.最后状态)
             }
-            Self::导出变量 => Self::导出(参数, 上下文),
-            Self::取消变量 => {
-                上下文.环境.retain(|(键, _)| !参数.contains(键));
+            Self::删除变量 => {
                 for 键 in 参数 {
-                    std::env::remove_var(键);
+                    上下文.删除变量(键);
                 }
                 0
             }
-            Self::列出环境 => {
-                let mut 输出端 = io::stdout().lock();
-                for (键, 值) in 上下文.环境.iter() {
-                    let _ = writeln!(输出端, "{键}={值}");
-                }
+            Self::读取变量 => {
+                列出全部变量(上下文);
                 0
             }
             Self::回显 => {
@@ -131,39 +147,51 @@ impl 内置命令 {
         }
     }
 
-    fn 导出(参数: &[String], 上下文: &mut 上下文) -> 整数 {
+    /// `环境变量` 关键字：
+    /// - `环境变量`：列出当前 shell 的全部环境变量
+    /// - `环境变量 名称=数据`：设置并导出；数据可带引号也可不带，
+    ///   带引号是因为有空格，单引号内是纯文本
+    fn 执行环境变量(参数: &[String], 上下文: &mut 上下文) -> 整数 {
         if 参数.is_empty() {
-            let mut 列表: Vec<String> = 上下文
-                .环境
-                .iter()
-                .map(|(键, 值)| format!("export {键}={值}"))
-                .collect();
-            列表.sort();
-            for 每条 in 列表 {
-                println!("{每条}");
-            }
+            列出全部变量(上下文);
             return 0;
         }
         let mut 状态 = 0;
         for 项 in 参数 {
-            match 项.split_once('=') {
-                Some((键, 值)) => {
-                    match 上下文.环境.iter_mut().find(|(已有键, _)| 已有键 == 键) {
-                        Some((_, 旧值)) => *旧值 = 值.to_string(),
-                        None => 上下文.环境.push((键.to_string(), 值.to_string())),
-                    }
-                    std::env::set_var(键, 值);
-                }
-                None => {
-                    // `export 名称`：不存在的变量只警告（与 bash 一致）
-                    if !上下文.环境.iter().any(|(键, _)| 键 == 项) {
-                        let _ = writeln!(io::stderr(), "export: {项}: 变量不存在");
-                        状态 = 1;
-                    }
-                }
+            let Some(等号位置) = 项.find('=') else {
+                let _ = writeln!(io::stderr(), "环境变量: {项}: 缺少 =数据");
+                状态 = 1;
+                continue;
+            };
+            let 名称 = &项[..等号位置];
+            let 数据 = &项[等号位置 + 1..];
+            if !是合法变量名(名称) {
+                let _ = writeln!(io::stderr(), "环境变量: {名称}: 不是合法的变量名");
+                状态 = 1;
+                continue;
             }
+            上下文.设置变量(名称, 数据);
         }
         状态
+    }
+}
+
+/// 变量名：首字符为字母或 `_`，其后为字母、数字、`_`（与赋值规则一致）。
+fn 是合法变量名(名称: &str) -> bool {
+    let mut 字符迭代 = 名称.chars();
+    字符迭代
+        .next()
+        .is_some_and(|首字| 首字.is_alphabetic() || 首字 == '_')
+        && 字符迭代.all(|字符| 字符.is_alphanumeric() || 字符 == '_')
+}
+
+/// 列出全部变量，每行 `名称=数据`，按名称排序。
+fn 列出全部变量(上下文: &mut 上下文) {
+    let mut 列表: Vec<&(String, String)> = 上下文.环境.iter().collect();
+    列表.sort_by(|甲, 乙| 甲.0.cmp(&乙.0));
+    let mut 输出端 = io::stdout().lock();
+    for (键, 值) in 列表 {
+        let _ = writeln!(输出端, "{键}={值}");
     }
 }
 
@@ -243,9 +271,10 @@ pub fn 帮助() {
 内置命令：
   cd [目录]        切换目录（cd 回家，cd - 回上一次）
   pwd              打印当前目录
-  export [名=值]   设置并导出环境变量（无参数时列出）
+  环境变量         列出当前 shell 的全部环境变量
+  环境变量 名=数据  设置并导出环境变量；数据可带引号（有空格时），单引号内是纯文本
   unset 名...      删除环境变量
-  env              列出环境变量
+  export / env     旧名：「export 名=数据」同「环境变量 名=数据」，「env」同「环境变量」
   echo [-n] [-e]   输出文本；-n 不换行，-e 解释 \n \t 等转义
   help             显示本帮助
   true / false     退出码 0 / 1
@@ -254,4 +283,56 @@ pub fn 帮助() {
 启动文件： ~/.壳语言rc 会在启动时逐行执行。
 其它：     Ctrl-C 中断当前行，Ctrl-D 退出。"##
     );
+}
+
+#[cfg(test)]
+mod 测试 {
+    use super::*;
+
+    fn 新上下文(环境: &mut Vec<(String, String)>) -> 上下文<'_> {
+        上下文 {
+            环境,
+            最后状态: 0,
+            退出: false,
+        }
+    }
+
+    #[test]
+    fn 环境变量列出与设置() {
+        let mut 环境: Vec<(String, String)> =
+            vec![("乙".into(), "2".into()), ("甲".into(), "1".into())];
+        let 命令 = 内置命令::处理环境变量;
+        // 无参数：列出，不动内容
+        assert_eq!(命令.运行(&[], &mut 新上下文(&mut 环境)), 0);
+        // 设置：新增与覆盖
+        let 参数 = vec!["甲=覆盖".to_string(), "丙=新".to_string()];
+        assert_eq!(命令.运行(&参数, &mut 新上下文(&mut 环境)), 0);
+        assert_eq!(环境.iter().find(|(键, _)| 键 == "甲").unwrap().1, "覆盖");
+        assert_eq!(环境.iter().find(|(键, _)| 键 == "丙").unwrap().1, "新");
+        // 参数展开后不含引号，空格原样保存在数据里
+        let 参数 = vec!["带空格的=你好 世界".to_string()];
+        assert_eq!(命令.运行(&参数, &mut 新上下文(&mut 环境)), 0);
+        assert_eq!(
+            环境.iter().find(|(键, _)| 键 == "带空格的").unwrap().1,
+            "你好 世界"
+        );
+        // 非法参数
+        assert_eq!(
+            命令.运行(&["没有等号".to_string()], &mut 新上下文(&mut 环境)),
+            1
+        );
+        assert_eq!(
+            命令.运行(&["1坏名=x".to_string()], &mut 新上下文(&mut 环境)),
+            1
+        );
+    }
+
+    #[test]
+    fn 合法变量名() {
+        assert!(是合法变量名("名字"));
+        assert!(是合法变量名("_x1"));
+        assert!(!是合法变量名(""));
+        assert!(!是合法变量名("1名"));
+        assert!(!是合法变量名("名 字"));
+    }
 }

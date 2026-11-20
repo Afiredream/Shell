@@ -26,7 +26,11 @@ fn main() {
             当前壳.加载启动文件();
             let 命令文本 = 命令行参数.get(1).cloned().unwrap_or_default();
             let 状态 = 当前壳.运行一行(&命令文本);
-            std::process::exit(if 当前壳.退出 { 当前壳.退出码 } else { 状态 });
+            std::process::exit(if 当前壳.退出 {
+                当前壳.退出码
+            } else {
+                状态
+            });
         }
         Some("-h" | "--help") => {
             模块::内置::帮助();
@@ -75,5 +79,9 @@ fn main() {
     if 是交互终端 {
         println!("再见。");
     }
-    std::process::exit(if 当前壳.退出 { 当前壳.退出码 } else { 当前壳.最后状态 });
+    std::process::exit(if 当前壳.退出 {
+        当前壳.退出码
+    } else {
+        当前壳.最后状态
+    });
 }

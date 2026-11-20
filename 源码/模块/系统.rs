@@ -33,7 +33,8 @@ mod c接口 {
         pub fn fork() -> 整数;
 
         #[cfg_attr(target_os = "linux", link_name = "execvp")]
-        pub unsafe fn r#execvp(文件名: *const 字符, 参数表: *const *const 字符) -> 整数;
+        pub unsafe fn r#execvp(文件名: *const 字符, 参数表: *const *const 字符)
+            -> 整数;
 
         #[cfg_attr(target_os = "linux", link_name = "waitpid")]
         pub fn waitpid(进程号: 整数, 状态: *mut 整数, 选项: 整数) -> 整数;

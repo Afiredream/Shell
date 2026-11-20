@@ -9,15 +9,15 @@
 
 // 所有文件都通过 `#[path]` 显式指定：Rust 不允许用非 ASCII 标识符名直接推断文件路径，
 // 因此「目录 / 文件名一律用中文」需要在这里手动接线。
-#[path = "壳.rs"]
-pub mod 壳;
 #[path = "内置.rs"]
 pub mod 内置;
+#[path = "壳.rs"]
+pub mod 壳;
 #[path = "执行.rs"]
 pub mod 执行;
-#[path = "释义.rs"]
-pub mod 释义;
-#[path = "词法.rs"]
-pub mod 词法;
 #[path = "系统.rs"]
 pub mod 系统;
+#[path = "词法.rs"]
+pub mod 词法;
+#[path = "释义.rs"]
+pub mod 释义;
