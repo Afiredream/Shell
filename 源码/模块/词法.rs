@@ -110,7 +110,7 @@ impl fmt::Display for 语法错误 {
 }
 
 fn 是空白(字符: char) -> bool {
-    字符 == ' ' || 字符 == '\t' || 字符 == '\r'
+    字符 == ' ' || 字符 == '\t' || 字符 == '\r' || 字符 == '\n'
 }
 
 fn 是操作符(字符: char) -> bool {
@@ -209,51 +209,25 @@ impl<'a> 解析器<'a> {
         }
         let mut 目标 = 词::default();
         while let Some(字符) = self.预看(0) {
-            if 是空白(字符) || 是操作符(字符) {
-                break;
-            }
-            self.当前位置 += 1;
             match 字符 {
                 '\\' => {
-                    let Some(下一个) = self.预看(0) else {
-                        return Err(语法错误::反斜杠在行尾);
-                    };
                     self.当前位置 += 1;
-                    目标.追加(下一个, true);
+                    match self.预看(0) {
+                        Some(下一个) => {
+                            目标.追加(下一个, true);
+                            self.当前位置 += 1;
+                        }
+                        None => return Err(语法错误::反斜杠在行尾),
+                    }
                 }
                 '\'' | '"' => {
-                    let 来自单引号 = 字符 == '\'';
-                    let mut 已闭合 = false;
-                    while let Some(内部字符) = self.预看(0) {
-                        self.当前位置 += 1;
-                        if 内部字符 == 字符 {
-                            已闭合 = true;
-                            break;
-                        }
-                        // 单引号内只认 `\'`，双引号内 `\x` 一律保留下一字符
-                        if 内部字符 == '\\' && self.预看(0).is_some_and(|下个| 来自单引号 && 下个 == '\'') {
-                            self.当前位置 += 1;
-                            目标.追加('\'', true);
-                            continue;
-                        }
-                        if 内部字符 == '\\' && !来自单引号 {
-                            let Some(下一个) = self.预看(0) else {
-                                return Err(语法错误::反斜杠在行尾);
-                            };
-                            self.当前位置 += 1;
-                            目标.追加(下一个, false);
-                            continue;
-                        }
-                        目标.追加(内部字符, 来自单引号);
-                    }
-                    if !已闭合 {
-                        return Err(语法错误::引号未闭合(字符));
-                    }
-                    if !来自单引号 {
-                        目标.含双引号 = true;
-                    }
+                    self.读引号进目标(&mut 目标, 字符)?;
                 }
-                _ => 目标.追加(字符, false),
+                _ if 是空白(字符) || 是操作符(字符) => break,
+                _ => {
+                    目标.追加(字符, false);
+                    self.当前位置 += 1;
+                }
             }
         }
         if 目标.文本.is_empty() {
@@ -262,9 +236,39 @@ impl<'a> 解析器<'a> {
         Ok(目标)
     }
 
+    /// 从当前引号开始，读到配对引号为止，内容写进 `目标`。
+    fn 读引号进目标(&mut self, 目标: &mut 词, 引号: char) -> Result<(), 语法错误> {
+        let 来自单引号 = 引号 == '\'';
+        if !来自单引号 {
+            目标.含双引号 = true;
+        }
+        self.当前位置 += 1;
+        while let Some(内部字符) = self.预看(0) {
+            if 内部字符 == 引号 {
+                self.当前位置 += 1;
+                return Ok(());
+            }
+            if 内部字符 == '\\' {
+                self.当前位置 += 1;
+                match self.预看(0) {
+                    Some(下一个) => {
+                        目标.追加(下一个, 来自单引号);
+                        self.当前位置 += 1;
+                    }
+                    None => return Err(语法错误::反斜杠在行尾),
+                }
+                continue;
+            }
+            目标.追加(内部字符, 来自单引号);
+            self.当前位置 += 1;
+        }
+        Err(语法错误::引号未闭合(引号))
+    }
+
     fn 运行(&mut self) -> Result<(), 语法错误> {
         while let Some(字符) = self.预看(0) {
             match 字符 {
+                // 反斜杠转义：`\` + 换行 是续行，其余取下一个字符的字面值
                 '\\' => {
                     self.当前位置 += 1;
                     match self.预看(0) {
@@ -277,17 +281,17 @@ impl<'a> 解析器<'a> {
                     }
                 }
                 '\'' | '"' => self.读引号(字符)?,
-                _ if 是空白(字符) => {
-                    self.收集词();
-                    self.当前位置 += 1;
-                }
                 '\n' => {
                     self.当前位置 += 1;
                     self.结束作业()?;
                 }
+                c if 是空白(c) => {
+                    self.收集词();
+                    self.当前位置 += 1;
+                }
                 // `#` 在词的开头位置才视为注释
                 '#' if self.当前词.is_none() => {
-                    while self.预看(0).is_some_and(|字符| 字符 != '\n') {
+                    while self.预看(0).is_some_and(|下一个| 下一个 != '\n') {
                         self.当前位置 += 1;
                     }
                 }
@@ -777,6 +781,27 @@ mod 测试 {
         assert!(!模式匹配("[!a-c]*", "cat"));
         assert!(模式匹配("中*", "中文"));
         assert!(模式匹配("*", ""));
+    }
+
+    #[test]
+    fn 重定向目标不吃换行() {
+        // 曾经：重定向目标把行尾换行也吞进文件名（`a.txt\n`），并把后面的行并进目标
+        let 作业列表 = 解析命令("echo hi > 输出.txt\npwd").unwrap();
+        assert_eq!(作业列表.len(), 2);
+        assert_eq!(作业列表[0].输出.as_ref().unwrap().0.文本, "输出.txt");
+        assert_eq!(展开全部(&作业列表[1].管道.命令[0]), ["pwd"]);
+
+        // 带引号、带空格、带空白的各种写法
+        for (输入, 期望) in [
+            ("echo x > \"带 空格.txt\"", "带 空格.txt"),
+            ("echo x > '单 引号.txt'", "单 引号.txt"),
+            ("echo x > 反\\ 斜杠.txt", "反 斜杠.txt"),
+            ("echo x > a.txt\r\nls", "a.txt"),
+        ] {
+            let 作业列表 = 解析命令(输入).unwrap();
+            assert_eq!(作业列表[0].输出.as_ref().unwrap().0.文本, 期望, "输入：{输入}");
+        }
+        assert_eq!(解析命令("echo x > a.txt\r\nls").unwrap().len(), 2);
     }
 
     #[test]

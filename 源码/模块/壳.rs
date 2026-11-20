@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use super::执行::{self, 重定向守护, 管道片段};
-use super::系统调用::整数;
+use super::系统::整数;
 use super::释义::{释义, 释义器};
 use super::内置;
 use super::词法;

@@ -1,6 +1,6 @@
 //! 进程编排：管道、重定向、后台作业。
 //!
-//! 所有系统调用都通过 [`super::系统调用`] 里手写的 libc 绑定完成
+//! 所有系统调用都通过 [`super::系统`] 里手写的 libc 绑定完成
 //! （不引入任何第三方 crate）——一个 shell 的骨架，
 //! 本质上就是分叉进程、建管道、接描述符、换程序、等进程。
 //!
@@ -11,8 +11,8 @@ use std::ffi::CString;
 use std::fmt;
 use std::process::{Command, ExitStatus};
 
-use super::系统调用 as 系统;
-use super::系统调用::整数;
+use super::系统;
+use super::系统::整数;
 use super::内置;
 
 // 标准流的描述符编号

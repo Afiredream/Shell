@@ -8,7 +8,7 @@
 
 use std::io::{self, Write};
 
-use super::系统调用::整数;
+use super::系统::整数;
 
 /// 内置命令执行时能看到的上下文。
 pub struct 上下文<'a> {

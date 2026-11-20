@@ -6,9 +6,9 @@
 //! - [`模块::执行`]：分叉进程、管道、接描述符、换程序、等待进程；
 //! - [`模块::内置`]：`cd`、`export`、`exit` 等 shell 自身命令；
 //! - [`模块::壳`]：串起以上各层，维护变量与退出状态；
-//! - [`模块::系统调用`]：手写的极简 C 库绑定（整个项目零第三方依赖）。
+//! - [`模块::系统`]：手写的极简 C 库绑定（整个项目零第三方依赖）。
 
-#[path = "模块/mod.rs"]
+#[path = "模块/模块.rs"]
 mod 模块;
 
 use std::io::{BufRead, IsTerminal, Write};
@@ -44,12 +44,13 @@ fn main() {
 
     // 先让 SIGINT/SIGTERM 被忽略，再分叉子进程：从分叉到换程序的窗口里
     // Ctrl-C 不会把刚建好的子进程打断；子进程换程序前会恢复成默认处理。
-    use 模块::系统调用 as 系统;
+    use 模块::系统;
     系统::设置信号处理(系统::中断信号, 系统::忽略信号);
     系统::设置信号处理(系统::终止信号, 系统::忽略信号);
 
     let 是交互终端 = std::io::stdin().is_terminal();
     let 标准输入 = std::io::stdin();
+    let mut 读取器 = 标准输入.lock();
     let mut 当前行 = String::new();
     loop {
         if 是交互终端 {
@@ -57,7 +58,8 @@ fn main() {
             let _ = std::io::stdout().flush();
         }
         当前行.clear();
-        match 标准输入.lock().read_line(&mut 当前行) {
+        // 必须复用同一个读取器：stdin 的缓冲区在锁之间共享，反复获取锁会把已读数据丢掉
+        match 读取器.read_line(&mut 当前行) {
             Ok(0) => break, // 输入结束（Ctrl-D）
             Ok(_) => {}
             Err(错误) => {
