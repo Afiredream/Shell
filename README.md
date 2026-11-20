@@ -2,7 +2,7 @@
 
 一个用 Rust 写的极简 shell：**零第三方依赖**，源码约 1500 行（不含测试），
 管道、重定向、后台、引号、变量、通配符全都自己实现，目录与文件、类型与函数名一律中文。
-编译出来的可执行文件就叫 **`壳`**（`cargo build --release` 后位于 `target/release/壳`）。
+编译出来的可执行文件就叫 **`壳`**（`cargo build --release` 后位于 `构建/release/壳`）。
 
 ```text
 $ cargo run
@@ -33,6 +33,16 @@ user@host:~$ echo 追加 >> 笔记.txt &
 
 内置命令：`cd`（支持 `cd -`）、`pwd`、`export`、`unset`、`env`、`echo [-n] [-e]`、
 `help`、`true`、`false`、`exit [码]`。
+
+## 目录约定
+
+| 目录 | 用途 | 是否入库 |
+| --- | --- | --- |
+| `源码/` | 全部源代码 | 是 |
+| `文档/` | 使用手册、语法参考、实现说明等 | 是 |
+| `构建/` | cargo 的构建产物（由 `.cargo/config.toml` 的 `target-dir` 指定） | 否 |
+| `临时/` | 临时测试、草稿文件，可随时清空 | 否 |
+| `测试临时/` | 旧名字，同样被忽略 | 否 |
 
 ## 源码命名
 
@@ -88,7 +98,7 @@ user@host:~$ echo 追加 >> 笔记.txt &
 ## 构建与测试
 
 ```sh
-cargo build --release          # 产物：target/release/壳
+cargo build --release          # 产物：构建/release/壳
 cargo test                     # 词法、展开、引号的单元测试（15 项）
 cargo clippy                   # 静态检查（0 警告）
 cargo run                      # 交互模式（提示符需要真实终端）

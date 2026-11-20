@@ -11,8 +11,8 @@
 
 ```sh
 cargo build --release
-./target/release/壳                    # 交互模式
-./target/release/壳 -c 'ls | wc -l'    # 执行一条命令
+./构建/release/壳                    # 交互模式
+./构建/release/壳 -c 'ls | wc -l'    # 执行一条命令
 ```
 
 ## 项目速览
