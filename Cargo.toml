@@ -1,12 +1,13 @@
 [package]
-name = "shell-lite"
+name = "shell-lite"        # crate 名必须 ASCII；可执行文件另见下面的 [[bin]]
 version = "0.1.0"
 edition = "2021"
 description = "极简 shell：内置命令 + 外部命令，支持管道、重定向、后台、环境变量与通配符"
 license = "MIT"
 
+# 编译出来的可执行文件叫「壳」（与源码命名约定一致）
 [[bin]]
-name = "shell-lite"
+name = "壳"
 path = "src/main.rs"
 
 [dependencies]

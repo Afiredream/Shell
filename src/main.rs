@@ -21,7 +21,7 @@ fn main() {
     let mut 当前壳 = 壳::新建();
 
     match 命令行参数.first().map(String::as_str) {
-        // `shell-lite -c "命令"`：执行一条命令后退出，方便脚本与测试
+        // `壳 -c "命令"`：执行一条命令后退出，方便脚本与测试
         Some("-c") => {
             当前壳.加载启动文件();
             let 命令文本 = 命令行参数.get(1).cloned().unwrap_or_default();
@@ -34,7 +34,7 @@ fn main() {
         }
         None => {}
         Some(其它参数) => {
-            eprintln!("shell-lite: 不认识的参数 {其它参数}（用法：shell-lite [-c 命令]）");
+            eprintln!("壳: 不认识的参数 {其它参数}（用法：壳 [-c 命令]）");
             std::process::exit(2);
         }
     }

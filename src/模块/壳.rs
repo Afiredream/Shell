@@ -54,7 +54,7 @@ impl 壳 {
 
     pub fn 问候(&self) {
         println!(
-            "壳语言 shell-lite v{} —— 输入 help 查看用法，Ctrl-D 退出。",
+            "壳 v{}（壳语言）—— 输入 help 查看用法，Ctrl-D 退出。",
             env!("CARGO_PKG_VERSION")
         );
     }

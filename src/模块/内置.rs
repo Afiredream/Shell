@@ -223,10 +223,10 @@ fn 解释转义(原文: &str) -> String {
 
 pub fn 帮助() {
     println!(
-        r##"壳语言 shell-lite —— 一个几百行的极简 shell
+        r##"壳 —— 一个几百行的极简 shell（壳语言）
 
-用法： shell-lite           进入交互模式
-       shell-lite -c "命令"  执行一条命令后退出
+用法： 壳            进入交互模式
+       壳 -c "命令"  执行一条命令后退出
 
 语法：
   管道      cmd1 | cmd2          把前一个命令的标准输出接到后一个

@@ -1,11 +1,12 @@
-# 壳语言 · shell-lite
+# 壳语言 · 壳
 
 一个用 Rust 写的极简 shell：**零第三方依赖**，源码约 1500 行（不含测试），
 管道、重定向、后台、引号、变量、通配符全都自己实现，目录与文件、类型与函数名一律中文。
+编译出来的可执行文件就叫 **`壳`**（`cargo build --release` 后位于 `target/release/壳`）。
 
 ```text
 $ cargo run
-壳语言 shell-lite v0.1.0 —— 输入 help 查看用法，Ctrl-D 退出。
+壳语言 壳 v0.1.0 —— 输入 help 查看用法，Ctrl-D 退出。
 user@host:~$ echo 你好 | tr -d '\n'; echo 世界
 你好世界
 user@host:~$ ls /不存在的 2>&1 | wc -l
@@ -87,7 +88,7 @@ src/
 ## 构建与测试
 
 ```sh
-cargo build --release          # 产物：target/release/shell-lite
+cargo build --release          # 产物：target/release/壳
 cargo test                     # 词法、展开、引号的单元测试（15 项）
 cargo clippy                   # 静态检查（0 警告）
 cargo run                      # 交互模式（提示符需要真实终端）

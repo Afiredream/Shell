@@ -210,7 +210,7 @@ pub fn 运行管道(片段: &管道片段) -> Result<整数, 执行错误> {
                 })()
             };
             if let Err(错误) = 接好结果 {
-                写标准错误(&format!("shell-lite: {错误}\n"));
+                写标准错误(&format!("壳: {错误}\n"));
                 系统::立即退出(1);
             }
             换成新程序(命令);
@@ -287,9 +287,9 @@ fn 换成新程序(命令: &简易命令) -> ! {
     系统::执行程序(指针表[0], 指针表.as_ptr());
     let 原因 = std::io::Error::last_os_error();
     let 提示 = match 原因.kind() {
-        std::io::ErrorKind::NotFound => format!("shell-lite: {程序名}: 未找到命令\n"),
-        std::io::ErrorKind::PermissionDenied => format!("shell-lite: {程序名}: 权限不足\n"),
-        _ => format!("shell-lite: {程序名}: {原因}\n"),
+        std::io::ErrorKind::NotFound => format!("壳: {程序名}: 未找到命令\n"),
+        std::io::ErrorKind::PermissionDenied => format!("壳: {程序名}: 权限不足\n"),
+        _ => format!("壳: {程序名}: {原因}\n"),
     };
     写标准错误(&提示);
     let 退出码 = if 原因.kind() == std::io::ErrorKind::NotFound { 127 } else { 126 };
