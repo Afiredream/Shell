@@ -328,6 +328,26 @@ mod 测试 {
     }
 
     #[test]
+    fn 中文变量名能传给子进程() {
+        // 环境变量只是内存里的字符串表，名字是中文也照样随 exec 传给子进程
+        let 命令 = 内置命令::处理环境变量;
+        let 参数 = vec!["跨进程名字=壳语言".to_string()];
+        let mut 环境: Vec<(String, String)> = Vec::new();
+        assert_eq!(命令.运行(&参数, &mut 新上下文(&mut 环境)), 0);
+        let 子进程 = std::process::Command::new("sh")
+            .arg("-c")
+            // sh 的变量名只认 ASCII，所以这里用 env 读，而不是 `$跨进程名字`
+            .arg("env | grep ^跨进程名字=")
+            .output()
+            .expect("无法启动 sh");
+        assert_eq!(
+            String::from_utf8_lossy(&子进程.stdout),
+            "跨进程名字=壳语言\n"
+        );
+        std::env::remove_var("跨进程名字");
+    }
+
+    #[test]
     fn 合法变量名() {
         assert!(是合法变量名("名字"));
         assert!(是合法变量名("_x1"));
