@@ -3,7 +3,7 @@ name = "shell"            # Cargo 包名必须 ASCII；可执行文件见下面�
 version = "0.1.0"
 edition = "2021"
 description = "壳语言：一个零依赖的极简 shell，编译产物名为「壳」"
-license = "AGPL-3.0-or-later"
+license = "AGPL-3.0-or-later"   # AGPL 第 3 版或任何更高版本
 [[bin]]
 name = "壳"
 path = "源码/主体.rs"

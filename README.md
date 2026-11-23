@@ -156,3 +156,41 @@ with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 完整条文见 [LICENSE](LICENSE)。简单说：可以自由使用、修改、分发，但**分发时必须以 AGPL 开源**；
 第 13 条还要求，如果把修改后的版本作为网络服务提供给他人使用，也要向他们提供对应的源码。
+
+## 发布与下载
+
+[`.github/workflows/发布.yml`](.github/workflows/发布.yml) 负责编译 Linux 版本：
+
+- **发布 Release 时自动触发**：在 GitHub 上发布（Publish，草稿转正式）一个 Release 后，
+  工作流自动编译并把安装包附加到该 Release；
+- **可手动触发**：Actions →「发布 Linux 版本」→ Run workflow，可填写标签/版本号，
+  还能选择是否顺手创建（或更新）对应的 Release；
+- 每次都会产出两个架构：`壳-<版本>-x86_64.tar.gz`（x86_64-unknown-linux-gnu）与
+  `壳-<版本>-aarch64.tar.gz`（aarch64-unknown-linux-gnu，交叉编译），并附 `.sha256` 校验文件；
+- x86_64 的包会在运行器上实际跑一遍（`-c` 与 `-h`）作为自检；
+- 手动触发时选「不创建 Release」，产物只保留在 Actions 运行页的 Artifacts 里，适合先试构建。
+
+> 注：工作流脚本里的 shell 变量一律用英文名。Runner 上的 bash 只认 ASCII 变量名，
+> 写成中文会变成「命令未找到」；工作流名、任务名、步骤名与输入名称则是中文。
+
+下载后安装：
+
+```sh
+tar -xzf 壳-0.1.0-x86_64.tar.gz
+sudo install -m 755 壳-0.1.0-x86_64/壳 /usr/local/bin/壳
+壳 -c 'echo 你好 | tr a-z A-Z'
+```
+
+发版步骤（本地）：
+
+```sh
+# 1) 改 Cargo.toml 里的 version
+# 2) 提交并推送
+git commit -am "release：0.2.0" && git push
+# 3) 打标签并推送
+git tag v0.2.0 && git push origin v0.2.0
+# 4) 在 GitHub 上到 Releases → Draft a new release → 选 v0.2.0 → Publish
+#    （Publish 的瞬间本工作流自动触发；也可以跳过 3、4，直接在 Actions 里手动运行）
+```
+
+

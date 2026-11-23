@@ -1,0 +1,179 @@
+# 发布工作流：发布 Release 时自动编译 Linux 版本并上传；也可以在 Actions 页面手动触发。
+#
+# 触发方式：
+#   1. 在 GitHub 网页或 gh 里发布（Publish）一个 Release —— 自动编译并附加到该 Release；
+#   2. Actions →「发布 Linux 版本」→ Run workflow（可填写版本号、标签，并选择是否创建 Release）。
+#
+# 产物：壳-<版本>-<架构>.tar.gz 与同名 .sha256，里面是可执行文件「壳」和 README、LICENSE。
+#
+# 说明：Runner 上的 bash 在赋值语句里只认 ASCII 变量名，所以脚本里的 shell 变量统一用英文，
+# 只有工作流名、job 名、步骤名、输入名称这些「给人看的」文字用中文。
+
+name: 发布 Linux 版本
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      版本号:
+        description: "版本号（例如 0.1.0）；留空则读取 Cargo.toml"
+        required: false
+        type: string
+      标签:
+        description: "Release 标签（例如 v0.1.0）；留空则用 v<版本号>"
+        required: false
+        type: string
+      创建Release:
+        description: "手动触发时，是否创建（或更新）对应的 Release"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 先把版本号和标签算出来，供后面的构建与发布任务共用
+  prepare:
+    name: 计算版本
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      tag: ${{ steps.read.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取版本号
+        id: read
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Cargo.toml 里的 version = "x.y.z"
+          crate_version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
+          version="${{ inputs.版本号 }}"
+          tag="${{ inputs.标签 }}"
+          if [ -z "$version" ]; then version="$crate_version"; fi
+          if [ -z "$tag" ]; then
+            if [ "${{ github.event_name }}" = "release" ]; then
+              tag="${{ github.event.release.tag_name }}"
+            else
+              tag="v${version}"
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "版本：$version，标签：$tag"
+
+  build:
+    name: 编译 ${{ matrix.target }}（${{ matrix.arch }}）
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            linker: gcc
+          - target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            linker: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 安装交叉编译链接器
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.arch == 'aarch64' && 'gcc-aarch64-linux-gnu' || 'gcc' }}
+
+      - name: 缓存依赖
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: 编译
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}
+          # 产物目录由 .cargo/config.toml 指定为「构建」
+          test -x "构建/${{ matrix.target }}/release/壳" && ls -l "构建/${{ matrix.target }}/release/壳"
+
+      - name: 打包
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          name="壳-${version}-${{ matrix.arch }}"
+          mkdir -p dist/"$name"
+          cp "构建/${{ matrix.target }}/release/壳" dist/"$name"/
+          cp README.md LICENSE dist/"$name"/
+          chmod +x dist/"$name"/壳
+          tar -C dist -czf "$name.tar.gz" "$name"
+          # 顺带留下 SHA256，方便下载者校验
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=$name.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: 本架构自检（x86_64 运行器能够执行）
+        if: matrix.arch == 'x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xzf "${{ steps.pack.outputs.archive }}" -C .
+          "./壳-${{ needs.prepare.outputs.version }}-${{ matrix.arch }}/壳" -c 'echo 自检通过 | tr a-z A-Z'
+          "./壳-${{ needs.prepare.outputs.version }}-${{ matrix.arch }}/壳" -h | head -n1
+
+      - name: 上传到本次 Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          files: |
+            ${{ steps.pack.outputs.archive }}
+            ${{ steps.pack.outputs.checksum }}
+          fail_on_unmatched_files: false
+
+      - name: 保存为工作流产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: 壳-${{ matrix.arch }}
+          path: |
+            ${{ steps.pack.outputs.archive }}
+            ${{ steps.pack.outputs.checksum }}
+          if-no-files-found: error
+
+  # 手动触发时：把两个架构的包挂到 Release 上（标签还没有 Release 就创建；已有则追加/覆盖同名文件）
+  publish:
+    name: 发布到 GitHub Release
+    needs: [prepare, build]
+    if: github.event_name == 'workflow_dispatch' && inputs.创建Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载构建好的压缩包
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 创建或更新 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: 壳 ${{ needs.prepare.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
