@@ -42,6 +42,15 @@ impl<'a> 释义器<'a> {
             "参数列表" => return Some(self.参数列表().join(" ")),
             "参数个数" => return Some(self.参数个数().to_string()),
             "参数对象" => return Some(self.参数对象().写JSON()),
+            // 运行时再取的全局变量：目录会随 `进入` 变化，脚本位置随 `导入` 嵌套变化
+            "当前目录" => {
+                return Some(match std::env::current_dir() {
+                    Ok(目录) => 目录.display().to_string(),
+                    Err(_) => self.环境表.get("PWD").cloned().unwrap_or_default(),
+                })
+            }
+            "脚本路径" => return Some(self.环境表.get("脚本路径").cloned().unwrap_or_default()),
+            "脚本目录" => return Some(self.环境表.get("脚本目录").cloned().unwrap_or_default()),
             _ => {}
         }
         if let Some(值) = self.环境表.get(名称) {

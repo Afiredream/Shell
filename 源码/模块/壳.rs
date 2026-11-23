@@ -82,8 +82,10 @@ impl 壳 {
         self.最后状态 = 0;
     }
 
-    /// `加载脚本` 的实现：在当前 shell 里逐行执行文件，变量、目录、目录栈都会保留。
-    /// 空行与 `#` 注释行与交互输入完全一致地处理。
+    /// `导入`/`加载脚本` 的实现：在当前 shell 里解析执行文件，变量、目录、目录栈都会保留。
+    ///
+    /// 执行期间设置 `$脚本路径`（原样）与 `$脚本目录`（规范化后的绝对目录），
+    /// 嵌套导入时逐层恢复。`$当前目录` 不设变量，取值时实时取自进程当前目录。
     pub fn 执行脚本文件(&mut self, 文件名: &str) -> 整数 {
         let 内容 = match std::fs::read_to_string(文件名) {
             Ok(内容) => 内容,
@@ -100,9 +102,25 @@ impl 壳 {
                 return 2;
             }
         };
+
+        let 原路径 = self.变量.get("脚本路径").cloned();
+        let 原目录 = self.变量.get("脚本目录").cloned();
+        let 路径 = std::path::Path::new(文件名);
+        let 绝对路径 = std::path::absolute(路径).unwrap_or_else(|_| 路径.to_path_buf());
+        let 目录 = 绝对路径
+            .parent()
+            .map(|上级| 上级.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.变量.insert("脚本路径".into(), 文件名.to_string());
+        self.变量.insert("脚本目录".into(), 目录);
+
         let 结果 = self.执行语句列表(&语句列表);
         // 脚本里改过的变量（内置命令已同步写进进程环境）并回 shell 的变量表
         self.变量.extend(std::env::vars());
+
+        恢复变量(&mut self.变量, "脚本路径", 原路径);
+        恢复变量(&mut self.变量, "脚本目录", 原目录);
+
         match 结果 {
             流::正常(码) => 码,
             // 解析阶段已拦截循环外的跳出/继续；到顶层的按当前状态处理
@@ -628,6 +646,19 @@ fn 展开命令文本(文本: &str, 查变量: &dyn Fn(&str) -> Option<String>) 
     结果
 }
 
+/// 脚本执行结束后恢复 `脚本路径`/`脚本目录`：原来没有就删掉，避免污染外层。
+fn 恢复变量(变量: &mut HashMap<String, String>, 名: &str, 原值: Option<String>) {
+    match 原值 {
+        Some(值) => {
+            变量.insert(名.to_string(), 值);
+        }
+        None => {
+            变量.remove(名);
+        }
+    }
+    std::env::remove_var(名);
+}
+
 /// 提示符里的目录：家目录显示成 `~`。
 fn 短目录() -> String {
     let 家目录 = dirs::home_dir()
@@ -694,6 +725,43 @@ mod 测试 {
                 r#"{"命令行":["构建","json"],"选项":{"release":"true","输出":"true","file":"数据.txt"},"分隔符":"--","剩余":["剩余一"]}"#
             )
         );
+    }
+
+    #[test]
+    fn 脚本目录与路径变量() {
+        let 根 = std::env::temp_dir().join("壳测试脚本目录");
+        let 子 = 根.join("子目录");
+        let _ = std::fs::remove_dir_all(&根);
+        std::fs::create_dir_all(&子).unwrap();
+        // 绝对路径导入，避免依赖测试时的工作目录；文件用标准库写就，不经 shell
+        std::fs::write(子.join("内.壳"), "内目录=$脚本目录\n").unwrap();
+        let 内脚本 = 子.join("内.壳").display().to_string();
+        std::fs::write(
+            根.join("外.壳"),
+            format!("外路径=$脚本路径\n外目录=$脚本目录\n导入 {内脚本}\n导入后=$脚本路径\n"),
+        )
+        .unwrap();
+
+        let mut 实例 = 壳::新建();
+        实例.执行脚本文件(&根.join("外.壳").display().to_string());
+        let 外脚本 = 根.join("外.壳").display().to_string();
+        assert_eq!(实例.变量.get("外路径").map(String::as_str), Some(外脚本.as_str()));
+        assert_eq!(实例.变量.get("外目录").map(String::as_str), Some(根.display().to_string().as_str()));
+        assert_eq!(实例.变量.get("内目录").map(String::as_str), Some(子.display().to_string().as_str()));
+        // 嵌套导入结束后恢复外层脚本的值
+        assert_eq!(实例.变量.get("导入后").map(String::as_str), Some(外脚本.as_str()));
+        // 顶层执行完不留下脚本变量
+        assert!(!实例.变量.contains_key("脚本路径"));
+        assert!(!实例.变量.contains_key("脚本目录"));
+
+        // `$当前目录` 实时取自进程当前目录
+        let 原目录 = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&子).unwrap();
+        实例.运行脚本文本("目录=$当前目录");
+        std::env::set_current_dir(&原目录).unwrap();
+        assert_eq!(实例.变量.get("目录").map(String::as_str), Some(子.display().to_string().as_str()));
+
+        let _ = std::fs::remove_dir_all(&根);
     }
 
     #[test]
