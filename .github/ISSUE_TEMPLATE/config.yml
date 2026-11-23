@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用手册
+    url: https://github.com/Afiredream/Shell/blob/主线/文档/使用手册.md
+    about: 先查文档，也许答案已经在里面
+  - name: 语法参考
+    url: https://github.com/Afiredream/Shell/blob/主线/文档/语法参考.md
+    about: 确认某个语法是否已经支持

@@ -1,0 +1,40 @@
+# 持续集成：每次 push 与 pull request 都跑编译、单元测试、静态检查。
+#
+# 脚本里的 shell 变量统一用英文（Runner 上的 bash 在赋值语句里只认 ASCII 变量名），
+# 工作流名、任务名、步骤名这些「给人看的」文字用中文；与「自动发布」保持同一风格。
+
+name: 持续集成
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: 编译·测试·检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装环境
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: 缓存依赖
+        uses: Swatinem/rust-cache@v2
+
+      - name: 编译
+        run: cargo build --release --locked
+
+      - name: 单元测试
+        run: cargo test --locked
+
+      - name: 静态检查
+        run: cargo clippy -- -D warnings
