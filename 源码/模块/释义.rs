@@ -22,7 +22,7 @@ pub enum 释义 {
 
 pub struct 释义器<'a> {
     /// shell 自己的变量表（优先于进程环境）
-    pub 环境表: &'a [(String, String)],
+    pub 环境表: &'a std::collections::HashMap<String, String>,
     /// 上一条命令的退出状态，供 `$?` 使用
     pub 最后状态: 整数,
     /// `$(命令)` 的执行器：返回命令的标准输出
@@ -34,7 +34,7 @@ impl<'a> 释义器<'a> {
         if 名称 == "?" {
             return Some(self.最后状态.to_string());
         }
-        if let Some((_, 值)) = self.环境表.iter().find(|(键, _)| 键 == 名称) {
+        if let Some(值) = self.环境表.get(名称) {
             return Some(值.clone());
         }
         std::env::var(名称).ok()

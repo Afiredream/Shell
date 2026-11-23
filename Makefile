@@ -7,17 +7,18 @@
 # 默认装到当前用户的 ~/bin；可用 `make 安装 安装目录=/别的/目录` 覆盖。
 安装目录 ?= $(HOME)/bin
 
-# 直接敲 make 时做全套检查与构建。
-全部: 检查 测试 构建
+# 直接敲 make 时：先出 release 产物，再做检查与测试。
+全部: 构建 检查 测试
 
 构建:
 	cargo build --release --locked
 
+# 测试走 dev profile（release 开了 panic=abort，测试框架无法捕获 panic）
 测试:
 	cargo test --locked
 
 检查:
-	cargo clippy -- -D warnings
+	cargo clippy --release -- -D warnings
 
 安装: 构建
 	@test -n "$(HOME)" || { echo "HOME 未设置，无法确定安装目录" >&2; exit 1; }

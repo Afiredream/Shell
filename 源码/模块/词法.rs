@@ -98,7 +98,7 @@ pub enum 语句 {
         分支: Vec<(作业, Vec<语句>)>,
         否则体: Option<Vec<语句>>,
     },
-    /// `对于 <变量> 在 <词...>` … `结束`
+    /// `对于 <变量> <词...>` … `结束`
     对于 {
         变量: String,
         取值: Vec<词>,
@@ -125,14 +125,11 @@ pub enum 语句 {
 pub enum 块错误 {
     #[error("{0}")]
     底层(语法错误),
-    /// 块还没写完（交互层据此继续攒行）
-    #[error("块未结束")]
-    未完成,
-    #[error("多余的「结束」")]
-    多余的结束,
+    #[error("「结束」已移除：块改用缩进表示")]
+    不再需要结束,
     #[error("「如果」缺少条件")]
     如果缺少条件,
-    #[error("「对于」格式应为「对于 变量 在 词...」")]
+    #[error("「对于」格式应为「对于 变量 词...」")]
     对于格式错误,
     #[error("「或者」没有匹配的「如果」")]
     或者没有匹配的如果,
@@ -257,29 +254,49 @@ fn 合并续行(输入: &str) -> String {
     结果
 }
 
-enum 块帧 {
+struct 块帧 {
+    缩进: usize,
+    类型: 块类型,
+}
+
+enum 块类型 {
     如果 {
         分支: Vec<(作业, Vec<语句>)>,
         否则体: Option<Vec<语句>>,
-        起始行: usize,
     },
     对于 {
         变量: String,
         取值: Vec<词>,
         体: Vec<语句>,
-        起始行: usize,
     },
     每当 {
         条件: 作业,
         体: Vec<语句>,
-        起始行: usize,
     },
     函数 {
         名称: String,
         参数: Vec<String>,
         体: Vec<语句>,
-        起始行: usize,
     },
+}
+
+impl 块类型 {
+    fn 转语句(self) -> 语句 {
+        match self {
+            块类型::如果 { 分支, 否则体, .. } => 语句::如果 { 分支, 否则体 },
+            块类型::对于 { 变量, 取值, 体, .. } => 语句::对于 { 变量, 取值, 体 },
+            块类型::每当 { 条件, 体, .. } => 语句::每当 { 条件, 体 },
+            块类型::函数 { 名称, 参数, 体, .. } => 语句::函数 { 名称, 参数, 体 },
+        }
+    }
+}
+
+/// 前导缩进宽度：空格记 1，制表符记 4。
+fn 缩进宽度(行: &str) -> usize {
+    行.chars()
+        .take_while(|字符| *字符 == ' ' || *字符 == '\t')
+        .map(|字符| if 字符 == '\t' { 4 } else { 1 })
+        .sum()
 }
 
 struct 脚本解析器 {
@@ -294,9 +311,9 @@ impl 脚本解析器 {
         if self.栈.is_empty() {
             return &mut self.根;
         }
-        match self.栈.last_mut().unwrap() {
-            块帧::对于 { 体, .. } | 块帧::每当 { 体, .. } | 块帧::函数 { 体, .. } => 体,
-            块帧::如果 {
+        match &mut self.栈.last_mut().unwrap().类型 {
+            块类型::对于 { 体, .. } | 块类型::每当 { 体, .. } | 块类型::函数 { 体, .. } => 体,
+            块类型::如果 {
                 分支, 否则体, ..
             } => {
                 if let Some(体) = 否则体 {
@@ -315,11 +332,19 @@ impl 脚本解析器 {
     fn 在循环中(&self) -> bool {
         self.栈
             .iter()
-            .any(|帧| matches!(帧, 块帧::对于 { .. } | 块帧::每当 { .. }))
+            .any(|帧| matches!(帧.类型, 块类型::对于 { .. } | 块类型::每当 { .. }))
     }
 
     fn 在函数定义中(&self) -> bool {
-        self.栈.iter().any(|帧| matches!(帧, 块帧::函数 { .. }))
+        self.栈.iter().any(|帧| matches!(帧.类型, 块类型::函数 { .. }))
+    }
+
+    /// 结束栈顶块：先把攒着的普通行放进它的体，再把它归约成语句挂到父体。
+    fn 归约栈顶(&mut self, 行号: usize) -> Result<(), 脚本错误> {
+        self.flush(行号)?;
+        let 帧 = self.栈.pop().unwrap();
+        self.当前体_mut().push(帧.类型.转语句());
+        Ok(())
     }
 
     /// 把攒着的普通行合并解析后放进当前体。
@@ -362,10 +387,11 @@ impl 脚本解析器 {
             return Err(格式错());
         }
         let 词列表 = &命令们[0].词列表;
-        if 词列表.len() < 2 || 词列表[1].文本 != "在" || 词列表[0].文本.is_empty() {
+        // 第一个词是循环变量，其余都是取值（不再需要「在」作分隔）
+        if 词列表.is_empty() || 词列表[0].文本.is_empty() {
             return Err(格式错());
         }
-        Ok((词列表[0].文本.clone(), 词列表[2..].to_vec()))
+        Ok((词列表[0].文本.clone(), 词列表[1..].to_vec()))
     }
 
     fn 解析函数头部(&self, 文本: &str, 行号: usize) -> Result<(String, Vec<String>), 脚本错误> {
@@ -389,53 +415,90 @@ impl 脚本解析器 {
     }
 
     fn 处理行(&mut self, 原文: &str, 行号: usize) -> Result<(), 脚本错误> {
-        let 行 = 原文.trim();
+        let 去左 = 原文.trim_start();
+        if 去左.trim().is_empty() || 去左.starts_with('#') {
+            return Ok(());
+        }
+        let 缩进 = 缩进宽度(原文);
+        let 行 = 去左.trim_end();
         let 首词 = 行.split_whitespace().next().unwrap_or("");
         let 余下 = 行[首词.len()..].trim();
+        let 是分支 = matches!(首词, "或者" | "否则");
+
+        // 结束所有更深的块
+        while self.栈.last().is_some_and(|帧| 帧.缩进 > 缩进) {
+            self.归约栈顶(行号)?;
+        }
+        if 是分支 {
+            // 分支必须与同缩进的「如果」对齐
+            let 有如果 = self.栈.last().is_some_and(|帧| {
+                帧.缩进 == 缩进 && matches!(帧.类型, 块类型::如果 { .. })
+            });
+            if !有如果 {
+                return Err(脚本错误 { 行: 行号, 原因: 块错误::或者没有匹配的如果 });
+            }
+        } else {
+            // 同缩进的块到此结束
+            while self.栈.last().is_some_and(|帧| 帧.缩进 == 缩进) {
+                self.归约栈顶(行号)?;
+            }
+        }
+
         match 首词 {
             "如果" => {
                 self.flush(行号)?;
                 let 条件 = self.解析条件(余下, 行号)?;
-                self.栈.push(块帧::如果 {
-                    分支: vec![(条件, Vec::new())],
-                    否则体: None,
-                    起始行: 行号,
+                self.栈.push(块帧 {
+                    缩进,
+                    类型: 块类型::如果 {
+                        分支: vec![(条件, Vec::new())],
+                        否则体: None,
+                    },
                 });
             }
             "或者" => {
                 self.flush(行号)?;
                 let 条件 = self.解析条件(余下, 行号)?;
-                match self.栈.last_mut() {
-                    Some(块帧::如果 { 分支, 否则体, .. }) => {
+                if let Some(帧) = self.栈.last_mut() {
+                    if let 块类型::如果 { 分支, 否则体, .. } = &mut 帧.类型 {
                         if 否则体.is_some() {
                             return Err(脚本错误 { 行: 行号, 原因: 块错误::否则之后不能再有或者 });
                         }
                         分支.push((条件, Vec::new()));
                     }
-                    _ => return Err(脚本错误 { 行: 行号, 原因: 块错误::或者没有匹配的如果 }),
                 }
             }
             "否则" => {
                 self.flush(行号)?;
-                match self.栈.last_mut() {
-                    Some(块帧::如果 { 否则体, .. }) => *否则体 = Some(Vec::new()),
-                    _ => return Err(脚本错误 { 行: 行号, 原因: 块错误::或者没有匹配的如果 }),
+                if let Some(帧) = self.栈.last_mut() {
+                    if let 块类型::如果 { 否则体, .. } = &mut 帧.类型 {
+                        *否则体 = Some(Vec::new());
+                    }
                 }
             }
             "对于" => {
                 self.flush(行号)?;
                 let (变量, 取值) = self.解析对于头部(余下, 行号)?;
-                self.栈.push(块帧::对于 { 变量, 取值, 体: Vec::new(), 起始行: 行号 });
+                self.栈.push(块帧 {
+                    缩进,
+                    类型: 块类型::对于 { 变量, 取值, 体: Vec::new() },
+                });
             }
             "每当" => {
                 self.flush(行号)?;
                 let 条件 = self.解析条件(余下, 行号)?;
-                self.栈.push(块帧::每当 { 条件, 体: Vec::new(), 起始行: 行号 });
+                self.栈.push(块帧 {
+                    缩进,
+                    类型: 块类型::每当 { 条件, 体: Vec::new() },
+                });
             }
             "函数" => {
                 self.flush(行号)?;
                 let (名称, 参数) = self.解析函数头部(余下, 行号)?;
-                self.栈.push(块帧::函数 { 名称, 参数, 体: Vec::new(), 起始行: 行号 });
+                self.栈.push(块帧 {
+                    缩进,
+                    类型: 块类型::函数 { 名称, 参数, 体: Vec::new() },
+                });
             }
             "返回" => {
                 self.flush(行号)?;
@@ -455,18 +518,7 @@ impl 脚本解析器 {
                 self.加入语句(语句::返回(表达式));
             }
             "结束" => {
-                self.flush(行号)?;
-                let 帧 = self
-                    .栈
-                    .pop()
-                    .ok_or(脚本错误 { 行: 行号, 原因: 块错误::多余的结束 })?;
-                let 语句 = match 帧 {
-                    块帧::如果 { 分支, 否则体, .. } => 语句::如果 { 分支, 否则体 },
-                    块帧::对于 { 变量, 取值, 体, .. } => 语句::对于 { 变量, 取值, 体 },
-                    块帧::每当 { 条件, 体, .. } => 语句::每当 { 条件, 体 },
-                    块帧::函数 { 名称, 参数, 体, .. } => 语句::函数 { 名称, 参数, 体 },
-                };
-                self.加入语句(语句);
+                return Err(脚本错误 { 行: 行号, 原因: 块错误::不再需要结束 });
             }
             "跳出" | "继续" => {
                 self.flush(行号)?;
@@ -482,14 +534,8 @@ impl 脚本解析器 {
 
     fn 结束(mut self, 行号: usize) -> Result<Vec<语句>, 脚本错误> {
         self.flush(行号)?;
-        if let Some(帧) = self.栈.first() {
-            let 起始行 = match 帧 {
-                块帧::如果 { 起始行, .. }
-                | 块帧::对于 { 起始行, .. }
-                | 块帧::每当 { 起始行, .. }
-                | 块帧::函数 { 起始行, .. } => *起始行,
-            };
-            return Err(脚本错误 { 行: 起始行, 原因: 块错误::未完成 });
+        while !self.栈.is_empty() {
+            self.归约栈顶(行号)?;
         }
         Ok(self.根)
     }
@@ -971,34 +1017,35 @@ pub fn 通配展开(单字: &词, 模式: &str) -> Option<Vec<String>> {
     if 单字.含双引号 {
         return None;
     }
-    let 展开后字符: Vec<char> = 模式.chars().collect();
-    let 有原样通配符 = |序号: usize| {
-        let 是字面量 = 单字.字面量区.get(序号).copied().unwrap_or(false);
-        !是字面量 && matches!(展开后字符[序号], '*' | '?' | '[')
-    };
-    let 有原样通配 =
-        单字.文本.chars().count() == 展开后字符.len() && (0..展开后字符.len()).any(有原样通配符);
-    if !有原样通配 {
+    let 字符: Vec<char> = 模式.chars().collect();
+    if 单字.文本.chars().count() != 字符.len() {
+        return None;
+    }
+    if !字符.iter().enumerate().any(|(序号, 字)| {
+        matches!(字, '*' | '?' | '[') && !单字.字面量区.get(序号).copied().unwrap_or(false)
+    }) {
         return None;
     }
     let (目录部分, 文件名模式) = match 模式.rfind('/') {
         Some(位置) => (&模式[..=位置], &模式[位置 + 1..]),
         None => ("", 模式),
     };
-    let 要读的目录 = if 目录部分.is_empty() {
-        "."
-    } else {
-        目录部分
-    };
-    let mut 匹配列表: Vec<String> = std::fs::read_dir(要读的目录)
-        .ok()?
-        .flatten()
-        .map(|条目| 条目.file_name().to_string_lossy().into_owned())
-        .filter(|文件名| !文件名.starts_with('.') || 文件名模式.starts_with('.'))
-        .filter(|文件名| 模式匹配(文件名模式, 文件名))
-        .map(|文件名| format!("{目录部分}{文件名}"))
-        .collect();
-    匹配列表.sort();
+    let 要读的目录 = if 目录部分.is_empty() { "." } else { 目录部分 };
+    // 模式只编译一次，避免对目录里每个文件重复编译
+    let 匹配器 = glob::Pattern::new(&文件名模式.replace("[^", "[!")).ok()?;
+    let 隐藏可见 = 文件名模式.starts_with('.');
+    let 读目录 = std::fs::read_dir(要读的目录).ok()?;
+    let mut 匹配列表: Vec<String> = Vec::new();
+    for 条目 in 读目录.flatten() {
+        let 文件名 = 条目.file_name().to_string_lossy().into_owned();
+        if 文件名.starts_with('.') && !隐藏可见 {
+            continue;
+        }
+        if 匹配器.matches(&文件名) {
+            匹配列表.push(format!("{目录部分}{文件名}"));
+        }
+    }
+    匹配列表.sort_unstable();
     if 匹配列表.is_empty() {
         None
     } else {
@@ -1006,8 +1053,8 @@ pub fn 通配展开(单字: &词, 模式: &str) -> Option<Vec<String>> {
     }
 }
 
-/// shell 风格模式匹配：`*` 任意串、`?` 单字符、`[...]` 字符类。
-/// 用 `glob` crate 实现；模式不合法（如未闭合的 `[`）时退化为字面量比较。
+/// shell 风格模式匹配（仅测试用，运行时走 `通配展开` 里编译好的 Pattern）。
+#[cfg(test)]
 pub fn 模式匹配(模式: &str, 文本: &str) -> bool {
     // glob 只认 `[!...]` 取反；本项目兼容 `[^...]`，统一成 `[!`
     let 规范模式 = 模式.replace("[^", "[!");
@@ -1276,8 +1323,8 @@ mod 测试 {
 
     #[test]
     fn 解析脚本控制流() {
-        // 如果 / 否则
-        let 语句列表 = 解析脚本("如果 true\necho 是\n否则\necho 否\n结束").unwrap();
+        // 如果 / 否则（缩进表示块体）
+        let 语句列表 = 解析脚本("如果 真\n    echo 是\n否则\n    echo 否").unwrap();
         assert_eq!(语句列表.len(), 1);
         match &语句列表[0] {
             语句::如果 { 分支, 否则体 } => {
@@ -1289,7 +1336,7 @@ mod 测试 {
 
         // 或者分支
         let 语句列表 =
-            解析脚本("如果 false\necho 一\n或者 true\necho 二\n否则\necho 三\n结束").unwrap();
+            解析脚本("如果 假\n    echo 一\n或者 真\n    echo 二\n否则\n    echo 三").unwrap();
         match &语句列表[0] {
             语句::如果 { 分支, 否则体 } => {
                 assert_eq!(分支.len(), 2);
@@ -1299,7 +1346,7 @@ mod 测试 {
         }
 
         // 对于 / 每当
-        let 语句列表 = 解析脚本("对于 项 在 甲 乙\necho $项\n结束").unwrap();
+        let 语句列表 = 解析脚本("对于 项 甲 乙\n    echo $项").unwrap();
         match &语句列表[0] {
             语句::对于 { 变量, 取值, 体 } => {
                 assert_eq!(变量, "项");
@@ -1308,24 +1355,22 @@ mod 测试 {
             }
             _ => panic!("应为对于语句"),
         }
-        let 语句列表 = 解析脚本("每当 true\necho 圈\n结束").unwrap();
+        let 语句列表 = 解析脚本("每当 真\n    echo 圈").unwrap();
         assert!(matches!(&语句列表[0], 语句::每当 { .. }));
 
-        // 嵌套
+        // 嵌套（缩进层级）
         let 语句列表 =
-            解析脚本("对于 外 在 甲\n如果 true\n对于 内 在 一\necho x\n结束\n结束\n结束").unwrap();
+            解析脚本("对于 外 甲\n    如果 真\n        对于 内 一\n            echo x").unwrap();
         assert_eq!(语句列表.len(), 1);
 
-        // 未闭合 / 多余结束 / 循环外跳出
-        assert_eq!(解析脚本("如果 true\necho x").unwrap_err().原因, 块错误::未完成);
-        assert_eq!(解析脚本("结束").unwrap_err().原因, 块错误::多余的结束);
+        // 「结束」已移除 / 循环外跳出 / 条件不能后台
+        assert_eq!(解析脚本("结束").unwrap_err().原因, 块错误::不再需要结束);
         assert_eq!(
             解析脚本("跳出").unwrap_err().原因,
             块错误::循环外跳出或继续
         );
-        // 条件不能后台
         assert_eq!(
-            解析脚本("如果 异步运行 true\necho x\n结束").unwrap_err().原因,
+            解析脚本("如果 异步运行 true\n    echo x").unwrap_err().原因,
             块错误::条件不能后台
         );
 
@@ -1336,7 +1381,7 @@ mod 测试 {
 
     #[test]
     fn 解析脚本函数() {
-        let 语句列表 = 解析脚本("函数 问候 名字\necho 你好\n返回\n结束\n问候 世界").unwrap();
+        let 语句列表 = 解析脚本("函数 问候 名字\n    echo 你好\n    返回\n问候 世界").unwrap();
         assert_eq!(语句列表.len(), 2);
         match &语句列表[0] {
             语句::函数 { 名称, 参数, 体 } => {
@@ -1356,7 +1401,7 @@ mod 测试 {
             块错误::返回不在函数中
         );
         assert_eq!(
-            解析脚本("函数\n结束").unwrap_err().原因,
+            解析脚本("函数").unwrap_err().原因,
             块错误::函数缺少名称
         );
     }
