@@ -17,11 +17,16 @@ pub struct 上下文<'a> {
     pub 最后状态: 整数,
     /// 内置命令要求退出 shell 时置位
     pub 退出: bool,
+    /// 目录栈（`压栈目录` / `弹栈目录` 使用），栈顶是最后一次压入的目录
+    pub 目录栈: &'a mut Vec<std::path::PathBuf>,
+    /// 执行脚本文件：由 shell 调度层提供，`加载脚本` 用它逐行执行脚本。
+    /// 需要可变访问（改变量、改目录），所以是 `FnMut`。
+    pub 执行脚本文件: &'a mut dyn FnMut(&str) -> 整数,
 }
 
 impl 上下文<'_> {
     /// 设置（或新增）一个变量：变量表与进程环境同步更新。
-    fn 设置变量(&mut self, 名称: &str, 数据: &str) {
+    pub fn 设置变量(&mut self, 名称: &str, 数据: &str) {
         match self.环境.iter_mut().find(|(已有名称, _)| 已有名称 == 名称) {
             Some((_, 旧值)) => *旧值 = 数据.to_string(),
             None => self.环境.push((名称.to_string(), 数据.to_string())),
@@ -29,7 +34,7 @@ impl 上下文<'_> {
         std::env::set_var(名称, 数据);
     }
 
-    fn 删除变量(&mut self, 名称: &str) {
+    pub fn 删除变量(&mut self, 名称: &str) {
         self.环境.retain(|(已有名称, _)| 已有名称 != 名称);
         std::env::remove_var(名称);
     }
@@ -37,9 +42,12 @@ impl 上下文<'_> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum 内置命令 {
-    切换目录,
+    进入目录,
+    压栈目录,
+    弹栈目录,
     打印目录,
-    退出,
+    退出进程,
+    加载脚本,
     读取变量,
     删除变量,
     回显,
@@ -52,9 +60,18 @@ pub enum 内置命令 {
 /// 关键字 → 内置命令。`环境变量` 是正式名字，`export`/`env`/`unset` 保留为旧名，
 /// 老脚本和习惯 bash 的人不用改。
 const 全部: &[(&str, 内置命令)] = &[
-    ("cd", 内置命令::切换目录),
-    ("pwd", 内置命令::打印目录),
-    ("exit", 内置命令::退出),
+    ("进入目录", 内置命令::进入目录),
+    ("cd", 内置命令::进入目录), // 旧名保留
+    ("压栈目录", 内置命令::压栈目录),
+    ("pushd", 内置命令::压栈目录), // 旧名保留
+    ("弹栈目录", 内置命令::弹栈目录),
+    ("popd", 内置命令::弹栈目录), // 旧名保留
+    ("打印目录", 内置命令::打印目录),
+    ("pwd", 内置命令::打印目录), // 旧名保留
+    ("退出进程", 内置命令::退出进程),
+    ("exit", 内置命令::退出进程), // 旧名保留
+    ("加载脚本", 内置命令::加载脚本),
+    ("source", 内置命令::加载脚本), // 旧名保留
     ("环境变量", 内置命令::处理环境变量),
     ("export", 内置命令::处理环境变量), // 旧名保留，便于迁移
     ("env", 内置命令::读取变量),
@@ -79,7 +96,10 @@ impl 内置命令 {
         match self {
             // `环境变量` 既负责列出，也负责设置
             Self::处理环境变量 => Self::执行环境变量(参数, 上下文),
-            Self::切换目录 => Self::执行切换目录(参数),
+            Self::进入目录 => Self::执行进入目录(参数),
+            Self::压栈目录 => Self::执行压栈目录(参数, 上下文),
+            Self::弹栈目录 => Self::执行弹栈目录(上下文),
+            Self::加载脚本 => Self::执行加载脚本(参数, 上下文),
             Self::打印目录 => match std::env::current_dir() {
                 Ok(路径) => {
                     let _ = writeln!(io::stdout(), "{}", 路径.display());
@@ -90,7 +110,7 @@ impl 内置命令 {
                     1
                 }
             },
-            Self::退出 => {
+            Self::退出进程 => {
                 上下文.退出 = true;
                 let 参数里指定的码: Option<整数> = 参数.first().and_then(|文本| 文本.parse().ok());
                 参数里指定的码.unwrap_or(上下文.最后状态)
@@ -118,7 +138,7 @@ impl 内置命令 {
         }
     }
 
-    fn 执行切换目录(参数: &[String]) -> 整数 {
+    fn 执行进入目录(参数: &[String]) -> 整数 {
         let 目标 = match 参数.first().map(String::as_str) {
             None | Some("") => match std::env::var("HOME") {
                 Ok(家目录) => 家目录,
@@ -141,10 +161,81 @@ impl 内置命令 {
                 0
             }
             Err(错误) => {
-                let _ = writeln!(io::stderr(), "cd: {目标}: {错误}");
+                let _ = writeln!(io::stderr(), "进入目录: {目标}: {错误}");
                 1
             }
         }
+    }
+
+    /// `压栈目录 [目录]`：把目标目录压入目录栈并进入；不带参数时在当前目录与栈顶之间来回切换。
+    fn 执行压栈目录(参数: &[String], 上下文: &mut 上下文) -> 整数 {
+        let 旧的 = match std::env::current_dir() {
+            Ok(路径) => 路径,
+            Err(错误) => {
+                let _ = writeln!(io::stderr(), "压栈目录: 无法取得当前目录: {错误}");
+                return 1;
+            }
+        };
+        let 目标 = match 参数.first().map(String::as_str) {
+            None | Some("") => match 上下文.目录栈.pop() {
+                Some(栈顶) => 栈顶,
+                None => {
+                    let _ = writeln!(io::stderr(), "压栈目录: 目录栈是空的");
+                    return 1;
+                }
+            },
+            Some(目录) => std::path::PathBuf::from(目录),
+        };
+        if let Err(错误) = std::env::set_current_dir(&目标) {
+            // 进不去就把栈恢复原样，什么都不改变
+            if 参数.first().is_none_or(|目录| 目录.is_empty()) {
+                上下文.目录栈.push(目标.clone());
+            }
+            let _ = writeln!(io::stderr(), "压栈目录: {}: {错误}", 目标.display());
+            return 1;
+        }
+        上下文.目录栈.push(旧的);
+        if let Ok(现在目录) = std::env::current_dir() {
+            std::env::set_var("PWD", &现在目录);
+            std::env::set_var("OLDPWD", &目标);
+            打印目录栈(&[现在目录], 上下文);
+        }
+        0
+    }
+
+    /// `弹栈目录`：回到目录栈顶的目录，并把它从栈里取出。
+    fn 执行弹栈目录(上下文: &mut 上下文) -> 整数 {
+        let Some(目标) = 上下文.目录栈.pop() else {
+            let _ = writeln!(io::stderr(), "弹栈目录: 目录栈是空的");
+            return 1;
+        };
+        if let Err(错误) = std::env::set_current_dir(&目标) {
+            上下文.目录栈.push(目标.clone());
+            let _ = writeln!(io::stderr(), "弹栈目录: {}: {错误}", 目标.display());
+            return 1;
+        }
+        if let Ok(现在目录) = std::env::current_dir() {
+            std::env::set_var("PWD", &现在目录);
+            std::env::set_var("OLDPWD", &目标);
+            打印目录栈(&[现在目录], 上下文);
+        }
+        0
+    }
+
+    /// `加载脚本 文件`：在当前 shell 里逐行执行脚本（变量、目录变化都会保留）。
+    fn 执行加载脚本(参数: &[String], 上下文: &mut 上下文) -> 整数 {
+        if 参数.is_empty() {
+            let _ = writeln!(io::stderr(), "加载脚本: 缺少脚本文件名");
+            return 1;
+        }
+        let mut 状态 = 0;
+        for 文件 in 参数 {
+            状态 = (上下文.执行脚本文件)(文件);
+            if 上下文.退出 {
+                break;
+            }
+        }
+        状态
     }
 
     /// `环境变量` 关键字：
@@ -183,6 +274,28 @@ fn 是合法变量名(名称: &str) -> bool {
         .next()
         .is_some_and(|首字| 首字.is_alphabetic() || 首字 == '_')
         && 字符迭代.all(|字符| 字符.is_alphanumeric() || 字符 == '_')
+}
+
+/// 打印目录栈：先当前目录，再从栈顶到栈底列出（与 bash 的 `dirs` 顺序一致）。
+fn 打印目录栈(当前: &[std::path::PathBuf], 上下文: &上下文) {
+    let mut 输出 = String::new();
+    for 路径 in 当前 {
+        输出.push_str(&format!(" {}", 短路径(路径)));
+    }
+    for 路径 in 上下文.目录栈.iter().rev() {
+        输出.push_str(&format!(" {}", 短路径(路径)));
+    }
+    println!("{输出}");
+}
+
+/// 家目录显示成 `~`，与提示符一致。
+fn 短路径(路径: &std::path::Path) -> String {
+    let 显示 = 路径.display().to_string();
+    match std::env::var("HOME") {
+        Ok(家) if 显示 == 家 => "~".to_string(),
+        Ok(家) if 显示.starts_with(&format!("{家}/")) => format!("~{}", &显示[家.len()..]),
+        _ => 显示,
+    }
 }
 
 /// 列出全部变量，每行 `名称=数据`，按名称排序。
@@ -269,16 +382,19 @@ pub fn 帮助() {
   展开      $名称 与 ${{名称}}、~/路径、* ? [abc]、# 注释
 
 内置命令：
-  cd [目录]        切换目录（cd 回家，cd - 回上一次）
-  pwd              打印当前目录
-  环境变量         列出当前 shell 的全部环境变量
-  环境变量 名=数据  设置并导出环境变量；数据可带引号（有空格时），单引号内是纯文本
-  unset 名...      删除环境变量
-  export / env     旧名：「export 名=数据」同「环境变量 名=数据」，「env」同「环境变量」
-  echo [-n] [-e]   输出文本；-n 不换行，-e 解释 \n \t 等转义
-  help             显示本帮助
-  true / false     退出码 0 / 1
-  exit [码]        退出 shell
+  进入目录 [目录]        切换目录（不带参数回家，进入目录 - 回上一次）
+  压栈目录 [目录]        把目录压入目录栈并进入；不带参数时在当前目录与栈顶之间切换
+  弹栈目录               回到目录栈顶的目录，并把它弹出
+  打印目录               打印当前目录
+  环境变量               列出当前 shell 的全部环境变量
+  环境变量 名=数据        设置并导出环境变量；数据可带引号（有空格时），单引号内是纯文本
+  unset 名...            删除环境变量
+  加载脚本 文件...        在当前 shell 里逐行执行脚本（变量、目录变化都保留）
+  echo [-n] [-e]         输出文本；-n 不换行，-e 解释 \n \t 等转义
+  help                   显示本帮助
+  true / false           退出码 0 / 1
+  退出进程 [码]           退出 shell
+旧名（与新名等价）：cd、pushd、popd、pwd、export、env、source、exit
 
 启动文件： ~/.壳语言rc 会在启动时逐行执行。
 其它：     Ctrl-C 中断当前行，Ctrl-D 退出。"##
@@ -289,11 +405,18 @@ pub fn 帮助() {
 mod 测试 {
     use super::*;
 
-    fn 新上下文(环境: &mut Vec<(String, String)>) -> 上下文<'_> {
+    /// 测试用上下文；目录栈与脚本回调由调用方持有，保证借用生命周期够长。
+    fn 新上下文<'a>(
+        环境: &'a mut Vec<(String, String)>,
+        目录栈: &'a mut Vec<std::path::PathBuf>,
+        脚本: &'a mut dyn FnMut(&str) -> 整数,
+    ) -> 上下文<'a> {
         上下文 {
             环境,
             最后状态: 0,
             退出: false,
+            目录栈,
+            执行脚本文件: 脚本,
         }
     }
 
@@ -303,26 +426,41 @@ mod 测试 {
             vec![("乙".into(), "2".into()), ("甲".into(), "1".into())];
         let 命令 = 内置命令::处理环境变量;
         // 无参数：列出，不动内容
-        assert_eq!(命令.运行(&[], &mut 新上下文(&mut 环境)), 0);
+        assert_eq!(
+            命令.运行(&[], &mut 新上下文(&mut 环境, &mut Vec::new(), &mut |_| 0)),
+            0
+        );
         // 设置：新增与覆盖
         let 参数 = vec!["甲=覆盖".to_string(), "丙=新".to_string()];
-        assert_eq!(命令.运行(&参数, &mut 新上下文(&mut 环境)), 0);
+        assert_eq!(
+            命令.运行(&参数, &mut 新上下文(&mut 环境, &mut Vec::new(), &mut |_| 0)),
+            0
+        );
         assert_eq!(环境.iter().find(|(键, _)| 键 == "甲").unwrap().1, "覆盖");
         assert_eq!(环境.iter().find(|(键, _)| 键 == "丙").unwrap().1, "新");
         // 参数展开后不含引号，空格原样保存在数据里
         let 参数 = vec!["带空格的=你好 世界".to_string()];
-        assert_eq!(命令.运行(&参数, &mut 新上下文(&mut 环境)), 0);
+        assert_eq!(
+            命令.运行(&参数, &mut 新上下文(&mut 环境, &mut Vec::new(), &mut |_| 0)),
+            0
+        );
         assert_eq!(
             环境.iter().find(|(键, _)| 键 == "带空格的").unwrap().1,
             "你好 世界"
         );
         // 非法参数
         assert_eq!(
-            命令.运行(&["没有等号".to_string()], &mut 新上下文(&mut 环境)),
+            命令.运行(
+                &["没有等号".to_string()],
+                &mut 新上下文(&mut 环境, &mut Vec::new(), &mut |_| 0)
+            ),
             1
         );
         assert_eq!(
-            命令.运行(&["1坏名=x".to_string()], &mut 新上下文(&mut 环境)),
+            命令.运行(
+                &["1坏名=x".to_string()],
+                &mut 新上下文(&mut 环境, &mut Vec::new(), &mut |_| 0)
+            ),
             1
         );
     }
@@ -333,7 +471,10 @@ mod 测试 {
         let 命令 = 内置命令::处理环境变量;
         let 参数 = vec!["跨进程名字=壳语言".to_string()];
         let mut 环境: Vec<(String, String)> = Vec::new();
-        assert_eq!(命令.运行(&参数, &mut 新上下文(&mut 环境)), 0);
+        assert_eq!(
+            命令.运行(&参数, &mut 新上下文(&mut 环境, &mut Vec::new(), &mut |_| 0)),
+            0
+        );
         let 子进程 = std::process::Command::new("sh")
             .arg("-c")
             // sh 的变量名只认 ASCII，所以这里用 env 读，而不是 `$跨进程名字`
@@ -345,6 +486,78 @@ mod 测试 {
             "跨进程名字=壳语言\n"
         );
         std::env::remove_var("跨进程名字");
+    }
+
+    #[test]
+    fn 目录栈压入与弹出() {
+        let 原始 = std::env::current_dir().unwrap();
+        let 临时 = std::env::temp_dir();
+        let mut 环境: Vec<(String, String)> = Vec::new();
+        let mut 目录栈: Vec<std::path::PathBuf> = Vec::new();
+        let mut 脚本 = |_: &str| 0;
+        let 参数 = vec![临时.display().to_string()];
+
+        assert_eq!(
+            内置命令::压栈目录.运行(&参数, &mut 新上下文(&mut 环境, &mut 目录栈, &mut 脚本)),
+            0
+        );
+        assert_eq!(std::env::current_dir().unwrap(), 临时);
+        assert_eq!(目录栈, vec![原始.clone()]);
+
+        // 不带参数：在当前目录与栈顶之间切换
+        assert_eq!(
+            内置命令::压栈目录.运行(&[], &mut 新上下文(&mut 环境, &mut 目录栈, &mut 脚本)),
+            0
+        );
+        assert_eq!(std::env::current_dir().unwrap(), 原始);
+        assert_eq!(目录栈, vec![临时.clone()]);
+
+        assert_eq!(
+            内置命令::弹栈目录.运行(&[], &mut 新上下文(&mut 环境, &mut 目录栈, &mut 脚本)),
+            0
+        );
+        assert_eq!(std::env::current_dir().unwrap(), 临时);
+        assert!(目录栈.is_empty());
+
+        // 空栈与不存在的目录
+        assert_eq!(
+            内置命令::弹栈目录.运行(&[], &mut 新上下文(&mut 环境, &mut 目录栈, &mut 脚本)),
+            1
+        );
+        assert_eq!(
+            内置命令::压栈目录.运行(
+                &["/不存在的目录".into()],
+                &mut 新上下文(&mut 环境, &mut 目录栈, &mut 脚本)
+            ),
+            1
+        );
+        assert!(目录栈.is_empty());
+        assert_eq!(std::env::current_dir().unwrap(), 临时);
+
+        std::env::set_current_dir(原始).unwrap();
+    }
+
+    #[test]
+    fn 加载脚本逐行执行() {
+        let mut 环境: Vec<(String, String)> = Vec::new();
+        let mut 目录栈: Vec<std::path::PathBuf> = Vec::new();
+        let mut 已执行: Vec<String> = Vec::new();
+        {
+            let mut 脚本 = |文件: &str| {
+                已执行.push(文件.to_string());
+                0
+            };
+            let 参数 = vec!["一.壳".to_string(), "二.壳".to_string()];
+            assert_eq!(
+                内置命令::加载脚本.运行(&参数, &mut 新上下文(&mut 环境, &mut 目录栈, &mut 脚本)),
+                0
+            );
+        }
+        assert_eq!(已执行, vec!["一.壳", "二.壳"]);
+        assert_eq!(
+            内置命令::加载脚本.运行(&[], &mut 新上下文(&mut 环境, &mut 目录栈, &mut |_| 0)),
+            1
+        );
     }
 
     #[test]

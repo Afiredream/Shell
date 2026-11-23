@@ -15,6 +15,8 @@ use super::释义::{释义, 释义器};
 
 pub struct 壳 {
     pub 变量: HashMap<String, String>,
+    /// 目录栈：`压栈目录` 推入、`弹栈目录` 取出
+    pub 目录栈: Vec<std::path::PathBuf>,
     pub 最后状态: 整数,
     pub 退出: bool,
     /// 退出时使用的状态码
@@ -31,6 +33,7 @@ impl 壳 {
         });
         Self {
             变量,
+            目录栈: Vec::new(),
             最后状态: 0,
             退出: false,
             退出码: 0,
@@ -39,13 +42,31 @@ impl 壳 {
 
     /// 启动时读取 `~/.壳语言rc`（存在才读），用来设置变量、导出环境等。
     /// 启动文件本身出错不会让 shell 起不来。
+    /// 启动时读取 `~/.壳语言rc`（存在才读），用来设置变量、导出环境等。
+    /// 启动文件本身出错不会让 shell 起不来。
     pub fn 加载启动文件(&mut self) {
         let Some(家目录) = std::env::var_os("HOME") else {
             return;
         };
         let 路径 = std::path::PathBuf::from(家目录).join(".壳语言rc");
-        let Ok(内容) = std::fs::read_to_string(&路径) else {
+        if !路径.exists() {
             return;
+        }
+        self.执行脚本文件(&路径.display().to_string());
+        // 启动文件的状态码不参与提示符显示
+        self.最后状态 = 0;
+    }
+
+    /// `加载脚本` 的实现：在当前 shell 里逐行执行文件，变量、目录、目录栈都会保留。
+    /// 空行与 `#` 注释行与交互输入完全一致地处理。
+    pub fn 执行脚本文件(&mut self, 文件名: &str) -> 整数 {
+        let 内容 = match std::fs::read_to_string(文件名) {
+            Ok(内容) => 内容,
+            Err(错误) => {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr(), "加载脚本: {文件名}: {错误}");
+                return 1;
+            }
         };
         for 每行 in 内容.lines() {
             if self.退出 {
@@ -53,8 +74,9 @@ impl 壳 {
             }
             self.运行一行(每行);
         }
-        // 启动文件的状态码不参与提示符显示
-        self.最后状态 = 0;
+        // 脚本里改过的变量（内置命令已同步写进进程环境）并回 shell 的变量表
+        self.变量.extend(std::env::vars());
+        self.最后状态
     }
 
     pub fn 问候(&self) {
@@ -138,25 +160,34 @@ impl 壳 {
             } else {
                 None
             };
-            let mut 上下文 = 内置::上下文 {
-                环境: &mut self.变量快照(),
-                最后状态: self.最后状态,
-                退出: false,
-            };
-            let 参数 = &片段.命令[0].参数列表[1..];
-            let 状态 = 内置命令.运行(参数, &mut 上下文);
-            self.变量 = 上下文.环境.drain(..).collect();
-            // 把内核里的环境变量也同步成新表，`cd`/`export` 之后再起的子进程才看得到
-            self.重设进程环境();
-            if 上下文.退出 {
-                self.退出 = true;
-                self.退出码 = 状态;
+            let mut 环境表 = self.变量快照();
+            let mut 目录栈 = std::mem::take(&mut self.目录栈);
+            let 状态;
+            {
+                // 拆开借用：执行脚本的闭包需要 `&mut self`，环境表与目录栈则作为参数借出
+                let 壳本身 = &mut *self;
+                let mut 上下文 = 内置::上下文 {
+                    环境: &mut 环境表,
+                    最后状态: 壳本身.最后状态,
+                    退出: false,
+                    目录栈: &mut 目录栈,
+                    执行脚本文件: &mut |文件| 壳本身.执行脚本文件(文件),
+                };
+                let 参数 = &片段.命令[0].参数列表[1..];
+                状态 = 内置命令.运行(参数, &mut 上下文);
+                if 上下文.退出 {
+                    壳本身.退出 = true;
+                    壳本身.退出码 = 状态;
+                }
             }
+            self.目录栈 = 目录栈;
+            self.变量 = self.合并内置修改(环境表);
             return 状态;
         }
 
         // 2) 外部命令：最简单的情况直接用标准库，其余走分叉/管道
         let 单条命令 = &片段.命令[0];
+
         let 执行结果 = if 片段.命令.len() == 1
             && !片段.重定向.是否设置()
             && !片段.重定向.合并错误
@@ -176,23 +207,25 @@ impl 壳 {
         }
     }
 
+    /// 内置命令执行完后合并变量。
+    ///
+    /// 内置命令改变量时总会同步写 `set_var` / `remove_var`，所以以**进程环境**为准；
+    /// 只是这样会漏掉「表里有、但进程环境里没有」的普通赋值（赋值本身也写 `set_var`，
+    /// 正常不会出现），为了稳妥，原表里进程环境没有的键保留。
+    fn 合并内置修改(&self, 原表: Vec<(String, String)>) -> HashMap<String, String> {
+        let 进程环境: HashMap<String, String> = std::env::vars().collect();
+        let mut 结果: HashMap<String, String> = 原表.into_iter().collect();
+        for (键, 值) in 进程环境 {
+            结果.insert(键, 值);
+        }
+        结果
+    }
+
     fn 变量快照(&self) -> Vec<(String, String)> {
         self.变量
             .iter()
             .map(|(键, 值)| (键.clone(), 值.clone()))
             .collect()
-    }
-
-    /// 用当前变量表重建进程环境（`unset` 掉的名字要真的消失）。
-    fn 重设进程环境(&self) {
-        for 旧键 in std::env::vars_os().map(|(键, _)| 键) {
-            if !self.变量.contains_key(旧键.to_string_lossy().as_ref()) {
-                std::env::remove_var(&旧键);
-            }
-        }
-        for (键, 值) in &self.变量 {
-            std::env::set_var(键, 值);
-        }
     }
 }
 
