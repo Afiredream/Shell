@@ -5,8 +5,10 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// 运行时值。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum 值 {
     整数(i64),
     文本(String),
@@ -34,6 +36,18 @@ impl 值 {
         }
     }
 
+    /// 序列化为 JSON（借助 serde_json）。
+    #[allow(non_snake_case)]
+    pub fn 转JSON(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// 从 JSON 还原为值。
+    #[allow(non_snake_case)]
+    pub fn 从JSON(文本: &str) -> Option<Self> {
+        serde_json::from_str(文本).ok()
+    }
+
     /// 转成退出码：整数取自身；文本若是数字也按数字取，其余视为成功（0）。
     pub fn 转退出码(&self) -> i64 {
         match self {
@@ -59,23 +73,16 @@ pub enum 表达式 {
     对象(Vec<(String, 表达式)>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum 表达式错误 {
+    #[error("{0} 没有闭合")]
     括号未闭合(char),
+    #[error("多余的符号 `{0}`")]
     多余符号(char),
+    #[error("对象项必须写成 `键=值`")]
     对象项格式错误,
+    #[error("表达式为空")]
     空表达式,
-}
-
-impl fmt::Display for 表达式错误 {
-    fn fmt(&self, 格式: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            表达式错误::括号未闭合(符号) => write!(格式, "{符号} 没有闭合"),
-            表达式错误::多余符号(符号) => write!(格式, "多余的符号 `{符号}`"),
-            表达式错误::对象项格式错误 => write!(格式, "对象项必须写成 `键=值`"),
-            表达式错误::空表达式 => write!(格式, "表达式为空"),
-        }
-    }
 }
 
 /// 求值：把表达式变成运行时值。
@@ -290,6 +297,13 @@ mod 测试 {
             值,
             值::数组(vec![值::文本("1".into()), 值::文本("你好".into())])
         );
+    }
+
+    #[test]
+    fn json往返() {
+        let 值 = 求值文本("{甲=1 列表=(2 三)}");
+        let json = 值.转JSON();
+        assert_eq!(值::从JSON(&json), Some(值));
     }
 
     #[test]

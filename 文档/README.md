@@ -17,7 +17,7 @@ cargo build --release
 
 ## 项目速览
 
-- 语言：Rust（edition 2021），**零第三方依赖**
+- 语言：Rust（edition 2021），依赖见 README「依赖与许可证」
 - 体积：8 个源文件，约 2100 行（含注释与测试）
 - 命名：目录、文件、类型、函数、变量一律中文（详见实现说明第 8 节）
 - 平台：Linux（Arch / glibc 下验证）

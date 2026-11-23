@@ -10,6 +10,7 @@ use std::io::{self, Write};
 
 use super::系统;
 use super::系统::整数;
+use super::值;
 
 /// 内置命令执行时能看到的上下文。
 pub struct 上下文<'a> {
@@ -53,6 +54,7 @@ pub enum 内置命令 {
     删除变量,
     输出文本,
     替换运行,
+    JSON转值,
     显示帮助,
     真,
     假,
@@ -82,6 +84,7 @@ const 全部: &[(&str, 内置命令)] = &[
     ("echo", 内置命令::输出文本), // 旧名保留
     ("替换运行", 内置命令::替换运行),
     ("exec", 内置命令::替换运行), // 旧名保留
+    ("JSON转值", 内置命令::JSON转值),
     ("help", 内置命令::显示帮助),
     ("true", 内置命令::真),
     ("false", 内置命令::假),
@@ -135,6 +138,7 @@ impl 内置命令 {
                 0
             }
             Self::替换运行 => 替换运行命令(参数),
+            Self::JSON转值 => 执行JSON转值(参数),
             Self::显示帮助 => {
                 帮助();
                 0
@@ -146,9 +150,9 @@ impl 内置命令 {
 
     fn 执行进入目录(参数: &[String]) -> 整数 {
         let 目标 = match 参数.first().map(String::as_str) {
-            None | Some("") => match std::env::var("HOME") {
-                Ok(家目录) => 家目录,
-                Err(_) => return 0,
+            None | Some("") => match dirs::home_dir() {
+                Some(家目录) => 家目录.display().to_string(),
+                None => return 0,
             },
             Some("-") => std::env::var("OLDPWD").unwrap_or_else(|_| ".".into()),
             Some(其它) => 其它.to_string(),
@@ -297,10 +301,18 @@ fn 打印目录栈(当前: &[std::path::PathBuf], 上下文: &上下文) {
 /// 家目录显示成 `~`，与提示符一致。
 fn 短路径(路径: &std::path::Path) -> String {
     let 显示 = 路径.display().to_string();
-    match std::env::var("HOME") {
-        Ok(家) if 显示 == 家 => "~".to_string(),
-        Ok(家) if 显示.starts_with(&format!("{家}/")) => format!("~{}", &显示[家.len()..]),
-        _ => 显示,
+    match dirs::home_dir() {
+        Some(家目录) => {
+            let 家 = 家目录.display().to_string();
+            if 显示 == 家 {
+                "~".to_string()
+            } else if 显示.starts_with(&format!("{家}/")) {
+                format!("~{}", &显示[家.len()..])
+            } else {
+                显示
+            }
+        }
+        None => 显示,
     }
 }
 
@@ -311,6 +323,26 @@ fn 列出全部变量(上下文: &mut 上下文) {
     let mut 输出端 = io::stdout().lock();
     for (键, 值) in 列表 {
         let _ = writeln!(输出端, "{键}={值}");
+    }
+}
+
+/// `JSON转值`：把 JSON 文本转成值的文本形式（借助 serde_json）。
+#[allow(non_snake_case)]
+fn 执行JSON转值(参数: &[String]) -> 整数 {
+    if 参数.is_empty() {
+        let _ = writeln!(io::stderr(), "JSON转值: 缺少 JSON 文本");
+        return 1;
+    }
+    let 文本 = 参数.join(" ");
+    match 值::值::从JSON(&文本) {
+        Some(值) => {
+            let _ = writeln!(io::stdout(), "{}", 值.转文本());
+            0
+        }
+        None => {
+            let _ = writeln!(io::stderr(), "JSON转值: 不是合法的 JSON");
+            1
+        }
     }
 }
 
@@ -428,7 +460,7 @@ pub fn 帮助() {
   后台      异步运行 cmd 参数     放到后台执行（旧写法 cmd & 仍可用）
   分隔      cmd1 ; cmd2          依次执行（换行同理）
   引号      单引号内原样；双引号内仅 $ 与 \ 可转义
-  展开      $名称 与 ${{名称}}、~/路径、* ? [abc]、# 注释
+  展开      $名称 与 ${{名称}}、$(命令)（命令替换）、~/路径、* ? [abc]、# 注释
 
 内置命令：
   进入目录 [目录]        切换目录（不带参数回家，进入目录 - 回上一次）
@@ -441,6 +473,7 @@ pub fn 帮助() {
   加载脚本 文件...        在当前 shell 里逐行执行脚本（变量、目录变化都保留）
   输出文本 [-n] [-e]     输出文本；-n 不换行，-e 解释 \n \t 等转义
   替换运行 程序 [参数]   用程序替换当前进程（exec）；无参数时什么都不做
+  JSON转值 JSON文本       把 JSON 转成值的文本形式（$返回值JSON 是 serde 格式）
   help                   显示本帮助
   true / false           退出码 0 / 1
   退出进程 [码]           退出 shell

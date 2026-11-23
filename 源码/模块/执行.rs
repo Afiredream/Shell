@@ -8,7 +8,6 @@
 //! 以及给内置命令用的 [`重定向守护`]（临时把标准输入/输出/错误指向文件，离开作用域自动恢复）。
 
 use std::ffi::CString;
-use std::fmt;
 use std::process::{Command, ExitStatus};
 
 use super::内置;
@@ -69,33 +68,26 @@ impl 管道片段 {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum 执行错误 {
+    #[error("创建管道失败: {0}")]
     无法创建管道(std::io::Error),
+    #[error("复制描述符失败: {0}")]
     无法复制描述符(std::io::Error),
+    #[error("{路径}: {原因}")]
     无法打开文件 {
         路径: String,
         原因: std::io::Error,
     },
+    #[error("{程序}: {原因}")]
     无法执行 {
         程序: String,
         原因: std::io::Error,
     },
+    #[error("等待进程失败: {0}")]
     无法等待进程(std::io::Error),
+    #[error("创建子进程失败")]
     子进程创建失败,
-}
-
-impl fmt::Display for 执行错误 {
-    fn fmt(&self, 格式: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::无法创建管道(错误) => write!(格式, "创建管道失败: {错误}"),
-            Self::无法复制描述符(错误) => write!(格式, "复制描述符失败: {错误}"),
-            Self::无法打开文件 { 路径, 原因 } => write!(格式, "{路径}: {原因}"),
-            Self::无法执行 { 程序, 原因 } => write!(格式, "{程序}: {原因}"),
-            Self::无法等待进程(错误) => write!(格式, "等待进程失败: {错误}"),
-            Self::子进程创建失败 => write!(格式, "创建子进程失败"),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

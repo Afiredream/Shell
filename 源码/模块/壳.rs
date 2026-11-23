@@ -70,10 +70,10 @@ impl 壳 {
     /// 启动时读取 `~/.壳语言rc`（存在才读），用来设置变量、导出环境等。
     /// 启动文件本身出错不会让 shell 起不来。
     pub fn 加载启动文件(&mut self) {
-        let Some(家目录) = std::env::var_os("HOME") else {
+        let Some(家目录) = dirs::home_dir() else {
             return;
         };
-        let 路径 = std::path::PathBuf::from(家目录).join(".壳语言rc");
+        let 路径 = 家目录.join(".壳语言rc");
         if !路径.exists() {
             return;
         }
@@ -285,6 +285,7 @@ impl 壳 {
                 let 退出码 = 返回值.转退出码() as 整数;
                 self.返回值 = 返回值.clone();
                 self.变量.insert("返回值".into(), 返回值.转文本());
+                self.变量.insert("返回值JSON".into(), 返回值.转JSON());
                 self.最后状态 = 退出码;
                 流::返回(退出码)
             }
@@ -517,7 +518,9 @@ fn 执行命令替换(命令: &str) -> String {
 
 /// 提示符里的目录：家目录显示成 `~`。
 fn 短目录() -> String {
-    let 家目录 = std::env::var("HOME").unwrap_or_default();
+    let 家目录 = dirs::home_dir()
+        .map(|路径| 路径.display().to_string())
+        .unwrap_or_default();
     let 当前目录 = std::env::current_dir()
         .map(|路径| 路径.display().to_string())
         .unwrap_or_else(|_| "?".into());
