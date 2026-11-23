@@ -8,6 +8,10 @@
 #
 # 产物：单个可执行文件 shell-<版本>-linux-x86_64 与同名 .sha256（不打包）。只发布 x86_64。
 #
+# 发布资产用 gh 命令行完成（先删同名旧资产再 --clobber 上传）：
+# 用 action-gh-release 覆盖已存在的资产时，遇到「资产已存在」会去 PATCH 一个不存在的资产，
+# 报 "Not Found - update-a-release-asset"，重新运行时容易踩到。
+#
 # 说明：Runner 上的 bash 在赋值语句里只认 ASCII 变量名，所以脚本里的 shell 变量统一用英文，
 # 只有工作流名、job 名、步骤名、输入名称这些「给人看的」文字用中文。
 
@@ -40,7 +44,7 @@ jobs:
       version: ${{ steps.read.outputs.version }}
       tag: ${{ steps.read.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 读取版本
         id: read
@@ -73,7 +77,7 @@ jobs:
       binary: ${{ steps.pack.outputs.binary }}
       checksum: ${{ steps.pack.outputs.checksum }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 安装环境
         uses: dtolnay/rust-toolchain@stable
@@ -107,7 +111,7 @@ jobs:
 
       - name: 上传发布
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           # 直接用当前 Release 的标签，保证文件挂到触发它的那个 Release 上
           tag_name: ${{ github.event.release.tag_name }}
@@ -117,7 +121,7 @@ jobs:
           fail_on_unmatched_files: true
 
       - name: 保存构建
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: 构建产物
           path: dist/
@@ -131,20 +135,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 下载构建
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: dist
           merge-multiple: true
 
       - name: 创建发布
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: 壳 v${{ needs.prepare.outputs.version }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: |
-            dist/shell-*
 
-            dist/*.sha256
+      - name: 上传资产
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          # 上传文件名只用 ASCII（与构建任务里生成的一致）
+          ASSET: shell-${{ needs.prepare.outputs.version }}-linux-x86_64
+        run: |
+          set -euo pipefail
+          for file in "dist/$ASSET" "dist/$ASSET.sha256"; do
+            test -f "$file" || { echo "::error::缺少 $file"; exit 1; }
+          done
+          # 重新运行同一标签时，旧资产还在；先删掉，否则 gh 会去 PATCH 一个已不存在的资产而上报 Not Found
+          for file in "dist/$ASSET" "dist/$ASSET.sha256"; do
+            gh release delete-asset "$TAG" "$(basename "$file")" --yes >/dev/null 2>&1 || true
+            gh release upload "$TAG" "$file" --clobber
+          done
+          gh release view "$TAG" --json assets --jq '.assets[].name'
