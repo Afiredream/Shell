@@ -31,6 +31,8 @@ pub enum 运行反馈 {
 
 pub struct 壳 {
     pub 变量: HashMap<String, String>,
+    /// 运行在 `$(命令)` 里：内置命令输出「值文本」，数组/对象可原样穿过
+    pub 命令替换中: bool,
     /// 目录栈：`压栈目录` 推入、`弹栈目录` 取出
     pub 目录栈: Vec<std::path::PathBuf>,
     pub 最后状态: 整数,
@@ -57,6 +59,7 @@ impl 壳 {
         });
         Self {
             变量,
+            命令替换中: false,
             目录栈: Vec::new(),
             最后状态: 0,
             退出: false,
@@ -217,6 +220,7 @@ impl 壳 {
     fn 导出副本(&self) -> 壳 {
         壳 {
             变量: self.变量.clone(),
+            命令替换中: true,
             目录栈: self.目录栈.clone(),
             最后状态: self.最后状态,
             退出: false,
@@ -450,6 +454,7 @@ impl 壳 {
                     | 内置::内置命令::真
                     | 内置::内置命令::假
             ) {
+                let 在命令替换里 = self.命令替换中;
                 let mut 空环境: Vec<(String, String)> = Vec::new();
                 let mut 空栈: Vec<std::path::PathBuf> = Vec::new();
                 // `读取文本` 等命令的结果先写进局部槽，执行完再落到 shell 上
@@ -463,6 +468,7 @@ impl 壳 {
                         目录栈: &mut 空栈,
                         执行脚本文件: &mut |文件| 壳本身.执行脚本文件(文件),
                         标准输入是管道: 片段.命令.len() > 1 || 片段.输入来自文件 || 执行::标准输入可读(),
+                        命令替换: 在命令替换里,
                         返回值对象: &mut 返回值对象,
                     };
                     let 参数 = &片段.命令[0].参数列表[1..];
@@ -478,6 +484,7 @@ impl 壳 {
                 return 状态;
             }
 
+            let 在命令替换里 = self.命令替换中;
             let mut 环境表 = self.变量快照();
             let mut 目录栈 = std::mem::take(&mut self.目录栈);
             let mut 返回值对象 = std::mem::take(&mut self.返回值对象);
@@ -492,6 +499,7 @@ impl 壳 {
                     目录栈: &mut 目录栈,
                     执行脚本文件: &mut |文件| 壳本身.执行脚本文件(文件),
                     标准输入是管道: 片段.命令.len() > 1 || 片段.输入来自文件 || 执行::标准输入可读(),
+                    命令替换: 在命令替换里,
                     返回值对象: &mut 返回值对象,
                 };
                 let 参数 = &片段.命令[0].参数列表[1..];
@@ -684,9 +692,13 @@ impl 内核 {
         if !self.壳.返回值对象.is_empty() {
             return self.壳.返回值对象.clone();
         }
-        String::from_utf8_lossy(&输出)
-            .trim_end_matches('\n')
-            .to_string()
+        let 原文 = String::from_utf8_lossy(&输出).trim_end_matches('\n').to_string();
+        // 输出本身就是值文本（`(a b)`、`{键=值}`）：还原成值文本返回，
+        // 这样数组/对象能穿过管道与命令替换，而不被当成普通文本
+        match 值::值::从值文本(&原文) {
+            Some(还原) => 还原.转文本(),
+            None => 原文,
+        }
     }
 }
 
