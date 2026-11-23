@@ -18,11 +18,18 @@ cargo build --release
 ## 项目速览
 
 - 语言：Rust（edition 2021），依赖见 README「依赖与许可证」
-- 体积：1 个源文件（`源码/主体.rs`），约 4500 行（含测试，无注释）
+- 体积：8 个源文件（Rust 模块），约 4600 行（含测试，无注释），一律英文文件名
 - 命名：Rust 标识符一律英文；中文只用于面向用户的命令名、关键字与提示
 - 平台：Linux（Arch / glibc 下验证）
 
 ```text
 源码/
-└── 主体.rs            # 单文件实现（入口 main 也在末尾）
+├── main.rs            # 入口
+├── sys.rs             # libc 封装
+├── value.rs           # 值/表达式、JSON/INI
+├── lexer.rs           # 分词、语法、展开、控制流语句层
+├── plan.rs            # 释义（作业 → 管道片段）
+├── exec.rs            # 进程编排
+├── builtin.rs         # 内置命令
+└── shell.rs           # 调度器
 ```
