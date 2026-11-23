@@ -159,11 +159,11 @@ with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ## 发布与下载
 
-[`.github/workflows/发布.yml`](.github/workflows/发布.yml) 负责编译 Linux 版本：
+[`.github/workflows/自动发布.yml`](.github/workflows/自动发布.yml) 负责编译 Linux 版本：
 
 - **发布 Release 时自动触发**：在 GitHub 上发布（Publish，草稿转正式）一个 Release 后，
   工作流自动编译并把安装包附加到该 Release；
-- **可手动触发**：Actions →「发布 Linux 版本」→ Run workflow，可填写标签/版本号，
+- **可手动触发**：Actions →「自动发布 Linux 版本」→ Run workflow，可填写标签/版本号，
   还能选择是否顺手创建（或更新）对应的 Release；
 - 每次都会产出两个架构：`壳-<版本>-x86_64.tar.gz`（x86_64-unknown-linux-gnu）与
   `壳-<版本>-aarch64.tar.gz`（aarch64-unknown-linux-gnu，交叉编译），并附 `.sha256` 校验文件；

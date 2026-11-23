@@ -2,14 +2,14 @@
 #
 # 触发方式：
 #   1. 在 GitHub 网页或 gh 里发布（Publish）一个 Release —— 自动编译并附加到该 Release；
-#   2. Actions →「发布 Linux 版本」→ Run workflow（可填写版本号、标签，并选择是否创建 Release）。
+#   2. Actions →「自动发布 Linux 版本」→ Run workflow（可填写版本号、标签，并选择是否创建 Release）。
 #
 # 产物：壳-<版本>-<架构>.tar.gz 与同名 .sha256，里面是可执行文件「壳」和 README、LICENSE。
 #
 # 说明：Runner 上的 bash 在赋值语句里只认 ASCII 变量名，所以脚本里的 shell 变量统一用英文，
 # 只有工作流名、job 名、步骤名、输入名称这些「给人看的」文字用中文。
 
-name: 发布 Linux 版本
+name: 自动发布 Linux 版本
 
 on:
   release:
