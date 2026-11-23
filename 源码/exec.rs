@@ -277,7 +277,7 @@ pub(crate) fn exec_child(commands: &SimpleCmd) -> ! {
         
         
         if matches!(builtin, Builtin::Import) && !program_name.starts_with('.') {
-            let message = "导入: 不支持在管道/后台里执行。\n";
+            let message = "加载脚本: 不支持在管道/后台里执行。\n";
             unsafe {
                 libc::write(2, message.as_ptr().cast(), message.len());
                 libc::_exit(1);

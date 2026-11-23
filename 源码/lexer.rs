@@ -115,7 +115,7 @@ pub(crate) enum BlockError {
     ElseAfterOr,
     #[error("「跳出」/「继续」只能用在循环中")]
     JumpOutsideLoop,
-    #[error("条件不能使用后台（异步 / &）")]
+    #[error("条件不能使用后台（异步运行 / &）")]
     CondBackground,
     #[error("「函数」缺少名称")]
     MissingFuncName,
@@ -532,7 +532,7 @@ impl<'a> Lexer<'a> {
         
         if eq_pos_field.is_none()
             && self.current_cmd.words.is_empty()
-            && word_in_progress.text == "异步"
+            && word_in_progress.text == "异步运行"
             && !word_in_progress.has_dquote
             && word_in_progress.literal_flags.iter().all(|&literal| !literal)
         {
@@ -1139,7 +1139,7 @@ mod lexer_tests {
     #[test]
     fn async_keyword() {
         
-        let jobs = parse_command("异步 sleep 3; echo hi").unwrap();
+        let jobs = parse_command("异步运行 sleep 3; echo hi").unwrap();
         assert_eq!(jobs.len(), 2);
         assert!(jobs[0].background);
         assert_eq!(expand_all(&jobs[0].pipeline.commands[0]), ["sleep", "3"]);
@@ -1147,14 +1147,14 @@ mod lexer_tests {
         assert_eq!(expand_all(&jobs[1].pipeline.commands[0]), ["echo", "hi"]);
 
         
-        let jobs = parse_command("异步 A=1 echo hi | cat").unwrap();
+        let jobs = parse_command("异步运行 A=1 echo hi | cat").unwrap();
         assert!(jobs[0].background);
         assert_eq!(jobs[0].pipeline.commands.len(), 2);
         assert_eq!(jobs[0].pipeline.commands[0].assigns.len(), 1);
 
         
-        assert_eq!(parse_command("异步").unwrap_err(), SyntaxError::MissingCommand);
-        assert_eq!(parse_command("异步 > 文件").unwrap_err(), SyntaxError::MissingCommand);
+        assert_eq!(parse_command("异步运行").unwrap_err(), SyntaxError::MissingCommand);
+        assert_eq!(parse_command("异步运行 > 文件").unwrap_err(), SyntaxError::MissingCommand);
 
         
         for input in ["'异步' arg", "\"异步\" arg"] {
@@ -1403,7 +1403,7 @@ mod lexer_tests {
             BlockError::JumpOutsideLoop
         );
         assert_eq!(
-            parse_script("如果 异步 true\n    echo x").unwrap_err().source,
+            parse_script("如果 异步运行 true\n    echo x").unwrap_err().source,
             BlockError::CondBackground
         );
 

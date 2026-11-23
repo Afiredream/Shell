@@ -474,7 +474,7 @@ impl Shell {
 
     pub(crate) fn import_files(&mut self, args: &[String]) -> c_int {
         if args.is_empty() {
-            let _ = writeln!(io::stderr(), "导入: 缺少脚本文件名");
+            let _ = writeln!(io::stderr(), "加载脚本: 缺少脚本文件名");
             return 1;
         }
         let mut status = 0;

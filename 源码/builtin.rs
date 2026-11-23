@@ -46,16 +46,16 @@ pub(crate) enum Builtin {
 }
 
 pub(crate) const ALL: &[(&str, Builtin)] = &[
-    ("进入", Builtin::EnterDir),
-    ("压栈", Builtin::PushDir),
-    ("弹栈", Builtin::PopDir),
-    ("退出", Builtin::Exit),
-    ("导入", Builtin::Import),
-    ("导出", Builtin::Export),
+    ("进入目录", Builtin::EnterDir),
+    ("压栈目录", Builtin::PushDir),
+    ("弹栈目录", Builtin::PopDir),
+    ("退出进程", Builtin::Exit),
+    ("加载脚本", Builtin::Import),
+    ("环境变量", Builtin::Export),
     ("删除", Builtin::DeleteVar),
     ("回显", Builtin::Echo),
     ("输出", Builtin::Print),
-    ("运行", Builtin::Exec),
+    ("同步运行", Builtin::Exec),
     ("正常", Builtin::True),
     ("错误", Builtin::False),
     ("读取文本", Builtin::ReadFile),
@@ -130,7 +130,7 @@ impl Builtin {
                 0
             }
             Err(error) => {
-                let _ = writeln!(io::stderr(), "进入: {target}: {error}");
+                let _ = writeln!(io::stderr(), "进入目录: {target}: {error}");
                 1
             }
         }
@@ -141,7 +141,7 @@ impl Builtin {
         let old_dir = match std::env::current_dir() {
             Ok(path) => path,
             Err(error) => {
-                let _ = writeln!(io::stderr(), "压栈: 无法取得当前目录: {error}");
+                let _ = writeln!(io::stderr(), "压栈目录: 无法取得当前目录: {error}");
                 return 1;
             }
         };
@@ -149,7 +149,7 @@ impl Builtin {
             None | Some("") => match ctx.dir_stack.pop() {
                 Some(top) => top,
                 None => {
-                    let _ = writeln!(io::stderr(), "压栈: 目录栈是空的");
+                    let _ = writeln!(io::stderr(), "压栈目录: 目录栈是空的");
                     return 1;
                 }
             },
@@ -160,7 +160,7 @@ impl Builtin {
             if args.first().is_none_or(|dir| dir.is_empty()) {
                 ctx.dir_stack.push(target.clone());
             }
-            let _ = writeln!(io::stderr(), "压栈: {}: {error}", target.display());
+            let _ = writeln!(io::stderr(), "压栈目录: {}: {error}", target.display());
             return 1;
         }
         ctx.dir_stack.push(old_dir);
@@ -175,12 +175,12 @@ impl Builtin {
     
     pub(crate) fn run_pop(ctx: &mut Context) -> c_int {
         let Some(target) = ctx.dir_stack.pop() else {
-            let _ = writeln!(io::stderr(), "弹栈: 目录栈是空的");
+            let _ = writeln!(io::stderr(), "弹栈目录: 目录栈是空的");
             return 1;
         };
         if let Err(error) = std::env::set_current_dir(&target) {
             ctx.dir_stack.push(target.clone());
-            let _ = writeln!(io::stderr(), "弹栈: {}: {error}", target.display());
+            let _ = writeln!(io::stderr(), "弹栈目录: {}: {error}", target.display());
             return 1;
         }
         if let Ok(now_dir) = std::env::current_dir() {
@@ -289,14 +289,14 @@ impl Builtin {
         let mut status = 0;
         for item in args {
             let Some(eq_pos_field) = item.find('=') else {
-                let _ = writeln!(io::stderr(), "导出: {item}: 缺少 =数据");
+                let _ = writeln!(io::stderr(), "环境变量: {item}: 缺少 =数据");
                 status = 1;
                 continue;
             };
             let name = &item[..eq_pos_field];
             let data = &item[eq_pos_field + 1..];
             if !is_valid_var(name) {
-                let _ = writeln!(io::stderr(), "导出: {name}: 不是合法的变量名");
+                let _ = writeln!(io::stderr(), "环境变量: {name}: 不是合法的变量名");
                 status = 1;
                 continue;
             }
@@ -457,9 +457,9 @@ pub(crate) fn exec_replace(args: &[String]) -> c_int {
     
     let source = io::Error::last_os_error();
     let message = match source.kind() {
-        io::ErrorKind::NotFound => format!("运行: {}: 未找到命令\n", args[0]),
-        io::ErrorKind::PermissionDenied => format!("运行: {}: 权限不足\n", args[0]),
-        _ => format!("运行: {}: {source}\n", args[0]),
+        io::ErrorKind::NotFound => format!("同步运行: {}: 未找到命令\n", args[0]),
+        io::ErrorKind::PermissionDenied => format!("同步运行: {}: 权限不足\n", args[0]),
+        _ => format!("同步运行: {}: {source}\n", args[0]),
     };
     let _ = io::stderr().write_all(message.as_bytes());
     if source.kind() == io::ErrorKind::NotFound {
