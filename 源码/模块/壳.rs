@@ -11,6 +11,7 @@ use super::内置;
 use super::执行::{self, 管道片段, 重定向守护};
 use super::系统::整数;
 use super::词法::{self, 块错误, 语句};
+use super::值::{self, 值 as 运行时值};
 use super::释义::{释义, 释义器};
 
 /// 控制流信号。用返回值传递，避免「忘记清除」的状态残留。
@@ -40,6 +41,8 @@ pub struct 壳 {
     pub 块缓冲: Vec<String>,
     /// 函数表：名称 → (参数名列表, 函数体)
     pub 函数表: HashMap<String, (Vec<String>, Vec<语句>)>,
+    /// 最近一次函数返回的值（`$返回值` 取其文本形式）
+    pub 返回值: 运行时值,
 }
 
 impl 壳 {
@@ -58,6 +61,7 @@ impl 壳 {
             退出码: 0,
             块缓冲: Vec::new(),
             函数表: HashMap::new(),
+            返回值: 运行时值::整数(0),
         }
     }
 
@@ -150,6 +154,7 @@ impl 壳 {
             let 释义器 = 释义器 {
                 环境表: &环境快照,
                 最后状态: self.最后状态,
+                命令替换: &执行命令替换,
             };
             match 释义器.释义(待执行作业) {
                 Err(消息) => {
@@ -213,6 +218,7 @@ impl 壳 {
                         let 释义器 = 释义器 {
                             环境表: &快照,
                             最后状态: self.最后状态,
+                            命令替换: &执行命令替换,
                         };
                         释义器.展开(字)
                     };
@@ -262,12 +268,25 @@ impl 壳 {
                 self.函数表.insert(名称.clone(), (参数.clone(), 体.clone()));
                 流::正常(0)
             }
-            语句::返回(码文本) => {
-                let 码 = 码文本
-                    .as_deref()
-                    .and_then(|文本| 文本.parse().ok())
-                    .unwrap_or(self.最后状态);
-                流::返回(码)
+            语句::返回(表达式) => {
+                let 返回值 = match 表达式 {
+                    Some(表达式) => {
+                        let 快照 = self.变量快照();
+                        值::求值(表达式, &|名| {
+                            快照
+                                .iter()
+                                .find(|(键, _)| 键 == 名)
+                                .map(|(_, 值)| 值.clone())
+                                .or_else(|| std::env::var(名).ok())
+                        })
+                    }
+                    None => 运行时值::整数(self.最后状态 as i64),
+                };
+                let 退出码 = 返回值.转退出码() as 整数;
+                self.返回值 = 返回值.clone();
+                self.变量.insert("返回值".into(), 返回值.转文本());
+                self.最后状态 = 退出码;
+                流::返回(退出码)
             }
         }
     }
@@ -481,6 +500,21 @@ impl 壳 {
     }
 }
 
+/// `$(命令)` 的执行器：交给 `/bin/sh` 运行，取标准输出并去掉结尾换行。
+/// 用系统 shell 是为了支持命令里的管道/重定向；它不认识本 shell 的中文内置命令。
+fn 执行命令替换(命令: &str) -> String {
+    match std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(命令)
+        .output()
+    {
+        Ok(输出) => String::from_utf8_lossy(&输出.stdout)
+            .trim_end_matches('\n')
+            .to_string(),
+        Err(_) => String::new(),
+    }
+}
+
 /// 提示符里的目录：家目录显示成 `~`。
 fn 短目录() -> String {
     let 家目录 = std::env::var("HOME").unwrap_or_default();
@@ -554,10 +588,11 @@ mod 测试 {
     fn 函数执行() {
         let mut 实例 = 壳::新建();
 
+        // 用独特变量名，避免与其它并行测试写进进程环境的同名变量串扰
         // 定义 + 命名参数
-        let 状态 = 实例.运行脚本文本("函数 问候 名字\n结果=你好$名字\n结束\n问候 世界");
+        let 状态 = 实例.运行脚本文本("函数 问候 名字\n函果甲=你好$名字\n结束\n问候 世界");
         assert_eq!(状态, 0);
-        assert_eq!(实例.变量.get("结果").map(String::as_str), Some("你好世界"));
+        assert_eq!(实例.变量.get("函果甲").map(String::as_str), Some("你好世界"));
 
         // 返回码
         let 状态 = 实例.运行脚本文本("函数 给码\n返回 7\n结束\n给码");
@@ -566,10 +601,43 @@ mod 测试 {
         // 命名参数与位置参数在函数返回后恢复
         实例.设置位置参数("脚本", &["全局".into()]);
         let 状态 = 实例.运行脚本文本(
-            "函数 设置 甲\n结果=内$甲$1\n结束\n甲=外\n设置 传\n结果2=外$甲$1",
+            "函数 设置 函参甲\n函果甲=内$函参甲$1\n结束\n函参甲=外\n设置 传\n函果乙=外$函参甲$1",
         );
         assert_eq!(状态, 0);
-        assert_eq!(实例.变量.get("结果").map(String::as_str), Some("内传传"));
-        assert_eq!(实例.变量.get("结果2").map(String::as_str), Some("外外全局"));
+        assert_eq!(实例.变量.get("函果甲").map(String::as_str), Some("内传传"));
+        assert_eq!(实例.变量.get("函果乙").map(String::as_str), Some("外外全局"));
+    }
+
+    #[test]
+    fn 返回值类型() {
+        use super::super::值::值 as 运行时值;
+        let mut 实例 = 壳::新建();
+
+        // 数组
+        let 状态 = 实例.运行脚本文本("函数 数组例\n返回 (1 2 三)\n结束\n数组例");
+        assert_eq!(状态, 0);
+        assert_eq!(
+            实例.返回值,
+            运行时值::数组(vec![
+                运行时值::整数(1),
+                运行时值::整数(2),
+                运行时值::文本("三".into()),
+            ])
+        );
+        assert_eq!(
+            实例.变量.get("返回值").map(String::as_str),
+            Some("(1 2 三)")
+        );
+
+        // 对象（含嵌套数组），且对象只是数据，没有方法/类
+        let 状态 = 实例.运行脚本文本("函数 对象例\n返回 {甲=(2 3)}\n结束\n对象例");
+        assert_eq!(状态, 0);
+        assert_eq!(
+            实例.返回值,
+            运行时值::对象(vec![(
+                "甲".into(),
+                运行时值::数组(vec![运行时值::整数(2), 运行时值::整数(3)])
+            )])
+        );
     }
 }

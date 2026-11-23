@@ -13,6 +13,8 @@
 
 use std::fmt;
 
+use super::值::{self, 表达式, 表达式错误};
+
 /// 一个词。引号只决定「怎么展开」，引号本身不会进入 `文本`。
 ///
 /// `字面量区` 与 `文本` 按字符一一对应：为 `true` 的字符来自单引号内部，
@@ -116,8 +118,8 @@ pub enum 语句 {
         参数: Vec<String>,
         体: Vec<语句>,
     },
-    /// `返回 [码]`，从函数返回
-    返回(Option<String>),
+    /// `返回 [表达式]`，从函数返回；表达式可以是整数、文本、数组、对象
+    返回(Option<表达式>),
 }
 
 /// 块级错误，带行号包装成 [`脚本错误`]。
@@ -135,6 +137,7 @@ pub enum 块错误 {
     条件不能后台,
     函数缺少名称,
     返回不在函数中,
+    表达式错误(表达式错误),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -169,6 +172,7 @@ impl fmt::Display for 脚本错误 {
             块错误::返回不在函数中 => {
                 write!(格式, "第 {} 行：「返回」只能用在函数中", self.行)
             }
+            块错误::表达式错误(错误) => write!(格式, "第 {} 行：{错误}", self.行),
         }
     }
 }
@@ -465,8 +469,17 @@ impl 脚本解析器 {
                 if !self.在函数定义中() {
                     return Err(脚本错误 { 行: 行号, 原因: 块错误::返回不在函数中 });
                 }
-                let 码 = 余下.split_whitespace().next().map(str::to_string);
-                self.加入语句(语句::返回(码));
+                let 表达式 = if 余下.is_empty() {
+                    None
+                } else {
+                    Some(
+                        值::解析表达式(余下).map_err(|原因| 脚本错误 {
+                            行: 行号,
+                            原因: 块错误::表达式错误(原因),
+                        })?,
+                    )
+                };
+                self.加入语句(语句::返回(表达式));
             }
             "结束" => {
                 self.flush(行号)?;
@@ -718,6 +731,11 @@ impl<'a> 解析器<'a> {
                 '2' if self.当前词.is_none() && self.预看(1) == Some('>') => {
                     self.读错误重定向()?;
                 }
+                // `$(命令)`：当前词以 `$` 结尾，把整段（含嵌套括号与引号）读进词里，
+                // 真正执行留给展开阶段
+                '(' if self.当前词.as_ref().is_some_and(|词| 词.文本.ends_with('$')) => {
+                    self.读命令替换()?;
+                }
                 '(' | ')' => return Err(语法错误::意外符号(字符.to_string())),
                 _ => {
                     if 字符 == '=' && self.赋值等号位置.is_none() {
@@ -746,6 +764,43 @@ impl<'a> 解析器<'a> {
         self.当前位置 += if 追加 { 3 } else { 2 };
         let 目标 = self.读重定向目标()?;
         self.当前作业.错误输出 = Some((目标, 追加));
+        Ok(())
+    }
+
+    /// 把 `$(...)` 整段读进当前词；支持嵌套括号与引号内的括号。
+    fn 读命令替换(&mut self) -> Result<(), 语法错误> {
+        let 起点 = self.当前位置;
+        let mut 深度 = 1;
+        let mut 引号: Option<char> = None;
+        self.当前位置 += 1;
+        while let Some(字符) = self.预看(0) {
+            if let Some(引) = 引号 {
+                if 字符 == 引 {
+                    引号 = None;
+                }
+            } else {
+                match 字符 {
+                    '\'' | '"' => 引号 = Some(字符),
+                    '(' => 深度 += 1,
+                    ')' => {
+                        深度 -= 1;
+                        if 深度 == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            self.当前位置 += 1;
+        }
+        if 深度 != 0 {
+            return Err(语法错误::引号未闭合(')'));
+        }
+        self.当前位置 += 1; // 跳过 ')'
+        let 段: String = self.字符表[起点..self.当前位置].iter().collect();
+        if let Some(词) = self.当前词.as_mut() {
+            词.文本.push_str(&段);
+        }
         Ok(())
     }
 
@@ -828,8 +883,12 @@ impl<'a> 解析器<'a> {
 /// - 单引号内的字符是字面量：不展开 `$`，也不通配；
 /// - 含有双引号的词只展开变量，不做通配与 `~`；
 /// - `查变量` 用于解析变量与 `$HOME`。
-pub fn 展开词(单字: &词, 查变量: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
-    let 文本 = 展开变量(单字, 查变量);
+pub fn 展开词(
+    单字: &词,
+    查变量: &dyn Fn(&str) -> Option<String>,
+    命令替换: &dyn Fn(&str) -> String,
+) -> Vec<String> {
+    let 文本 = 展开变量(单字, 查变量, 命令替换);
     if let Some(匹配列表) = 通配展开(单字, &文本) {
         return 匹配列表;
     }
@@ -837,7 +896,11 @@ pub fn 展开词(单字: &词, 查变量: &dyn Fn(&str) -> Option<String>) -> Ve
 }
 
 /// 变量与 `~` 展开（不做通配）。
-pub fn 展开变量(单字: &词, 查变量: &dyn Fn(&str) -> Option<String>) -> String {
+pub fn 展开变量(
+    单字: &词,
+    查变量: &dyn Fn(&str) -> Option<String>,
+    命令替换: &dyn Fn(&str) -> String,
+) -> String {
     let 字符表: Vec<char> = 单字.文本.chars().collect();
     let mut 结果 = String::new();
     let mut 游标 = 0;
@@ -849,6 +912,33 @@ pub fn 展开变量(单字: &词, 查变量: &dyn Fn(&str) -> Option<String>) ->
             continue;
         }
         match 字符表.get(游标 + 1) {
+            // `$(命令)`：执行并把标准输出插进来（结尾换行会被去掉）
+            Some('(') => {
+                let 命令起点 = 游标 + 2;
+                let mut 深度 = 1;
+                let mut 终点 = 命令起点;
+                while 终点 < 字符表.len() {
+                    match 字符表[终点] {
+                        '(' => 深度 += 1,
+                        ')' => {
+                            深度 -= 1;
+                            if 深度 == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    终点 += 1;
+                }
+                if 深度 == 0 {
+                    let 命令: String = 字符表[命令起点..终点].iter().collect();
+                    结果.push_str(&命令替换(&命令));
+                    游标 = 终点 + 1;
+                } else {
+                    结果.push('$');
+                    游标 += 1;
+                }
+            }
             // `${名称}`
             Some('{') => {
                 let 名称起点 = 游标 + 2;
@@ -1036,7 +1126,7 @@ mod 测试 {
         命令
             .词列表
             .iter()
-            .flat_map(|单字| 展开词(单字, &测试变量))
+            .flat_map(|单字| 展开词(单字, &测试变量, &|_| String::new()))
             .collect()
     }
 
