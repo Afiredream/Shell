@@ -280,6 +280,7 @@ fn 替换运行(命令: &简易命令) -> ! {
         let mut 环境表: Vec<(String, String)> = std::env::vars().collect();
         // 子进程里的内置命令不共享 shell 的目录栈，也不能回头加载脚本
         let mut 空目录栈: Vec<std::path::PathBuf> = Vec::new();
+        let mut 空返回值 = String::new();
         let 状态 = 内置命令.运行(
             &命令.参数列表[1..],
             &mut 内置::上下文 {
@@ -288,6 +289,7 @@ fn 替换运行(命令: &简易命令) -> ! {
                 退出: false,
                 目录栈: &mut 空目录栈,
                 执行脚本文件: &mut |_| 1,
+                返回值对象: &mut 空返回值,
             },
         );
         系统::立即退出(状态);

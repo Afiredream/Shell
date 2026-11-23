@@ -214,6 +214,105 @@ fn 读JSON文本(字节: &[u8], 读位: &mut usize) -> Option<String> {
     }
 }
 
+impl 值 {
+    /// 按文件类型解析文本：`JSON` / `INI` / `文本`（其它类型名返回错误）。
+    pub fn 解析文本(文本: &str, 类型: &str) -> Result<值, String> {
+        match 类型.to_ascii_uppercase().as_str() {
+            "JSON" => 值::读JSON(文本).ok_or_else(|| "不是合法的 JSON".to_string()),
+            "INI" => Ok(读INI(文本)),
+            "文本" | "TEXT" => Ok(值::文本(文本.to_string())),
+            其它 => Err(format!("不支持的类型 `{其它}`（可用 JSON、INI、文本）")),
+        }
+    }
+}
+
+/// 极简 INI：`[段]` 开启一段，`键=值` 归属最近一段（段之前的键归入 `全局`），
+/// 值含 `,` 时拆成数组，`#`/`;` 整行注释，行尾注释只在 `#` 前有空白时才算。
+/// 段与键按出现顺序保存；同名键后者覆盖前者。
+fn 读INI(文本: &str) -> 值 {
+    // 当前段的名字与该段的键值表
+    let mut 段名 = String::from("全局");
+    let mut 段表: Vec<(String, Vec<(String, 值)>)> = vec![(段名.clone(), Vec::new())];
+    for 原行 in 文本.lines() {
+        let 行 = 原行.trim();
+        if 行.is_empty() || 行.starts_with('#') || 行.starts_with(';') {
+            continue;
+        }
+        if let Some(段) = 行.strip_prefix('[').and_then(|余| 余.strip_suffix(']')) {
+            段名 = 段.trim().to_string();
+            if !段表.iter().any(|(名字, _)| *名字 == 段名) {
+                段表.push((段名.clone(), Vec::new()));
+            }
+            continue;
+        }
+        let Some((键, 原值)) = 行.split_once('=') else {
+            continue;
+        };
+        let 键 = 键.trim().to_string();
+        let 值 = ini键值(去掉行尾注释(原值.trim()));
+        let 段 = 段表
+            .iter_mut()
+            .find(|(名字, _)| *名字 == 段名)
+            .expect("段表中必有当前段");
+        match 段.1.iter_mut().find(|(已有键, _)| *已有键 == 键) {
+            Some((_, 旧值)) => *旧值 = 值,
+            None => 段.1.push((键, 值)),
+        }
+    }
+    // 没有键的段不入结果（`[段]` 后直接结束的段仍保留空对象，方便判断存在性）
+    值::对象(
+        段表
+            .into_iter()
+            .filter(|(_, 键值)| !键值.is_empty())
+            .map(|(名字, 键值)| (名字, 值::对象(键值)))
+            .collect(),
+    )
+}
+
+/// 行尾注释：`#` 前是空白、且不在引号里，视为注释开始。
+fn 去掉行尾注释(原值: &str) -> &str {
+    let 字节 = 原值.as_bytes();
+    let mut 引导号: Option<u8> = None;
+    for (序, &字) in 字节.iter().enumerate() {
+        match 字 {
+            b'"' | b'\'' => match 引导号 {
+                None => 引导号 = Some(字),
+                Some(引导) if 引导 == 字 => 引导号 = None,
+                _ => {}
+            },
+            b'#' | b';' if 引导号.is_none() && 序 > 0 && 字节[序 - 1].is_ascii_whitespace() => {
+                return 原值[..序].trim_end()
+            }
+            _ => {}
+        }
+    }
+    原值
+}
+
+fn ini键值(原值: &str) -> 值 {
+    // 引号包起来的是纯文本
+    if 原值.len() >= 2
+        && ((原值.starts_with('"') && 原值.ends_with('"'))
+            || (原值.starts_with('\'') && 原值.ends_with('\'')))
+    {
+        return 值::文本(原值[1..原值.len() - 1].to_string());
+    }
+    let 项们: Vec<&str> = 原值.split(',').map(str::trim).filter(|项| !项.is_empty()).collect();
+    let 单值 = |文本: &str| match 文本.parse::<i64>() {
+        Ok(整数) => 值::整数(整数),
+        Err(_) => match 文本.to_ascii_lowercase().as_str() {
+            "true" => 值::文本("true".into()),
+            "false" => 值::文本("false".into()),
+            _ => 值::文本(文本.to_string()),
+        },
+    };
+    if 项们.len() > 1 {
+        值::数组(项们.into_iter().map(单值).collect())
+    } else {
+        单值(原值)
+    }
+}
+
 fn 写JSON值(项: &值, 输出: &mut String) {
     match 项 {
         值::整数(数) => 输出.push_str(&数.to_string()),
@@ -511,6 +610,39 @@ mod 测试 {
             值::对象(vec![("n".into(), 值::整数(3))])
         );
         assert!(值::读JSON("{不是JSON}").is_none());
+    }
+
+    #[test]
+    fn 解析INI() {
+        let 文本 = "[全局]\n名称=壳\n# 注释\n[服务]\n端口=8080\n地址=\"127.0.0.1:80\"\n标签=甲, 乙 ";
+        let 结果 = 值::解析文本(文本, "INI").unwrap();
+        assert_eq!(
+            结果,
+            值::对象(vec![
+                (
+                    "全局".into(),
+                    值::对象(vec![("名称".into(), 值::文本("壳".into()))])
+                ),
+                (
+                    "服务".into(),
+                    值::对象(vec![
+                        ("端口".into(), 值::整数(8080)),
+                        ("地址".into(), 值::文本("127.0.0.1:80".into())),
+                        (
+                            "标签".into(),
+                            值::数组(vec![值::文本("甲".into()), 值::文本("乙".into())])
+                        ),
+                    ])
+                ),
+            ])
+        );
+        assert_eq!(结果.写JSON(), r#"{"全局":{"名称":"壳"},"服务":{"端口":8080,"地址":"127.0.0.1:80","标签":["甲","乙"]}}"#);
+        // 类型名不区分大小写；不认识的类型报错
+        assert!(值::解析文本("{}", "json").is_ok());
+        assert!(值::解析文本("{}", "INI").is_ok());
+        assert!(值::解析文本("x", "YAML").is_err());
+        assert!(值::解析文本("{坏", "JSON").is_err());
+        assert_eq!(值::解析文本("原样 # 不处理", "文本").unwrap(), 值::文本("原样 # 不处理".into()));
     }
 
     #[test]

@@ -10,6 +10,7 @@ use std::io::{self, Write};
 
 use super::系统;
 use super::系统::整数;
+use super::值::值 as 运行值;
 
 /// 内置命令执行时能看到的上下文。
 pub struct 上下文<'a> {
@@ -23,6 +24,8 @@ pub struct 上下文<'a> {
     /// 执行脚本文件：由 shell 调度层提供，`加载脚本` 用它逐行执行脚本。
     /// 需要可变访问（改变量、改目录），所以是 `FnMut`。
     pub 执行脚本文件: &'a mut dyn FnMut(&str) -> 整数,
+    /// 最近一次 `读取文本` 的结果，写成可再被解析的表达式文本（对象/数组/文本/整数）
+    pub 返回值对象: &'a mut String,
 }
 
 impl 上下文<'_> {
@@ -56,6 +59,7 @@ pub enum 内置命令 {
     真,
     假,
     处理环境变量,
+    读取文本,
 }
 
 /// 关键字 → 内置命令，全部用两字中文名。
@@ -73,6 +77,7 @@ const 全部: &[(&str, 内置命令)] = &[
     ("帮助", 内置命令::显示帮助),
     ("正常", 内置命令::真),
     ("错误", 内置命令::假),
+    ("读取文本", 内置命令::读取文本),
 ];
 
 /// 按命令行里敲的名字查内置命令。
@@ -113,6 +118,7 @@ impl 内置命令 {
                 0
             }
             Self::替换运行 => 替换运行命令(参数),
+            Self::读取文本 => Self::执行读取文本(参数, 上下文),
             Self::显示帮助 => {
                 帮助();
                 0
@@ -222,6 +228,56 @@ impl 内置命令 {
         状态
     }
 
+    /// `读取文本 文件 [--类型 类型]`：按类型解析文件内容，结果放入 `$返回值对象`。
+    ///
+    /// 类型可写 `--类型 JSON`、`--类型=JSON`、`--JSON`，默认按扩展名推断；
+    /// 类型名不区分大小写。解析出错时返回 1，`$返回值对象` 置空。
+    fn 执行读取文本(参数: &[String], 上下文: &mut 上下文) -> 整数 {
+        if 参数.is_empty() {
+            let _ = writeln!(io::stderr(), "读取文本: 缺少文件路径");
+            return 1;
+        }
+        let 文件 = 参数[0].as_str();
+        // `--类型 X`、`--类型=X`、`--X` 三种写法；`--类型` 后面跟着的是类型名本身
+        let mut 指定类型: Option<String> = None;
+        let mut 序 = 1;
+        while 序 < 参数.len() {
+            let 项 = 参数[序].as_str();
+            序 += 1;
+            if let Some(类型) = 项.strip_prefix("--类型=") {
+                指定类型 = Some(类型.to_string());
+            } else if 项 == "--类型" {
+                match 参数.get(序) {
+                    Some(类型) => {
+                        指定类型 = Some(类型.clone());
+                        序 += 1;
+                    }
+                    None => {
+                        let _ = writeln!(io::stderr(), "读取文本: --类型 后面缺少类型名");
+                        return 1;
+                    }
+                }
+            } else if let Some(类型) = 项.strip_prefix("--") {
+                指定类型 = Some(类型.to_string());
+            }
+        }
+        let 类型 = 指定类型.unwrap_or_else(|| 按扩展名推断类型(文件));
+        let 结果 = std::fs::read_to_string(文件)
+            .map_err(|错误| format!("{错误}"))
+            .and_then(|文本| 运行值::解析文本(&文本, &类型));
+        上下文.返回值对象.clear();
+        match 结果 {
+            Ok(解析结果) => {
+                *上下文.返回值对象 = 解析结果.转文本();
+                0
+            }
+            Err(消息) => {
+                let _ = writeln!(io::stderr(), "读取文本: {文件}（{类型}）: {消息}");
+                1
+            }
+        }
+    }
+
     /// `环境变量` 关键字：
     /// - `环境变量`：列出当前 shell 的全部环境变量
     /// - `环境变量 名称=数据`：设置并导出；数据可带引号也可不带，
@@ -253,6 +309,16 @@ impl 内置命令 {
             }
         }
         状态
+    }
+}
+
+/// 没有 `--类型` 时按扩展名推断：`.ini` → INI，其余（含 `.json`）→ JSON。
+fn 按扩展名推断类型(文件: &str) -> String {
+    match std::path::Path::new(文件).extension().and_then(|扩展| 扩展.to_str()) {
+        Some(扩展) if 扩展.eq_ignore_ascii_case("ini") || 扩展.eq_ignore_ascii_case("conf") => {
+            "INI".to_string()
+        }
+        _ => "JSON".to_string(),
     }
 }
 
@@ -445,7 +511,9 @@ pub fn 帮助() {
   输出 文本...        直接输出，不追加回车
   回显 文本...        输出并回车（-n 不回车，-e 解释 \n \t 等转义）
   运行 程序 [参数]   用程序替换当前进程；无参数时什么都不做
-  帮助               显示本帮助
+  读取文本 文件 [--类型 类型]  按类型解析文件，结果放进 $返回值对象
+                     类型：JSON / INI / 文本（默认按扩展名：.ini/.conf 用 INI，其余 JSON）
+                     例：读取文本 配置.json --类型 JSON；读取文本 配置.ini
   正常 / 错误         退出码 0 / 1
   退出 [码]           退出 shell
 
@@ -464,13 +532,46 @@ mod 测试 {
         目录栈: &'a mut Vec<std::path::PathBuf>,
         脚本: &'a mut dyn FnMut(&str) -> 整数,
     ) -> 上下文<'a> {
+        let 返回值 = Box::leak(Box::new(String::new()));
         上下文 {
             环境,
             最后状态: 0,
             退出: false,
             目录栈,
             执行脚本文件: 脚本,
+            返回值对象: 返回值,
         }
+    }
+
+    #[test]
+    fn 读取文本按类型解析() {
+        let mut 环境: Vec<(String, String)> = Vec::new();
+        let mut 目录栈: Vec<std::path::PathBuf> = Vec::new();
+        let mut 脚本 = |_: &str| 0;
+        let 文件 = std::env::temp_dir().join("壳读取文本测试.ini");
+        std::fs::write(&文件, "[段]\n键 = 值 \n数=3\n").unwrap();
+        let 路径 = 文件.display().to_string();
+        {
+            let mut 上下文 = 新上下文(&mut 环境, &mut 目录栈, &mut 脚本);
+            assert_eq!(内置命令::读取文本.运行(std::slice::from_ref(&路径), &mut 上下文), 0);
+            assert_eq!(*上下文.返回值对象, "{段={键=值 数=3}}");
+        }
+        {
+            let 参数 = vec![路径.clone(), "--类型".into(), "文本".into()];
+            let mut 上下文 = 新上下文(&mut 环境, &mut 目录栈, &mut 脚本);
+            assert_eq!(内置命令::读取文本.运行(&参数, &mut 上下文), 0);
+            assert_eq!(*上下文.返回值对象, std::fs::read_to_string(&路径).unwrap());
+        }
+        {
+            let 参数 = vec![路径.clone(), "--类型".into(), "不存在的类型".into()];
+            let mut 上下文 = 新上下文(&mut 环境, &mut 目录栈, &mut 脚本);
+            assert_eq!(内置命令::读取文本.运行(&参数, &mut 上下文), 1);
+            assert!(上下文.返回值对象.is_empty());
+        }
+        // 参数缺失
+        let mut 上下文 = 新上下文(&mut 环境, &mut 目录栈, &mut 脚本);
+        assert_eq!(内置命令::读取文本.运行(&[], &mut 上下文), 1);
+        let _ = std::fs::remove_file(&文件);
     }
 
     #[test]

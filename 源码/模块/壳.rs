@@ -43,6 +43,8 @@ pub struct 壳 {
     pub 函数表: HashMap<String, (Vec<String>, Vec<语句>)>,
     /// 最近一次函数返回的值（`$返回值` 取其文本形式）
     pub 返回值: 运行时值,
+    /// 最近一次 `读取文本` 的结果（表达式文本），在 `$返回值对象` 中可见
+    pub 返回值对象: String,
 }
 
 impl 壳 {
@@ -62,6 +64,7 @@ impl 壳 {
             块缓冲: Vec::new(),
             函数表: HashMap::new(),
             返回值: 运行时值::整数(0),
+            返回值对象: String::new(),
         }
     }
 
@@ -402,6 +405,8 @@ impl 壳 {
             ) {
                 let mut 空环境: Vec<(String, String)> = Vec::new();
                 let mut 空栈: Vec<std::path::PathBuf> = Vec::new();
+                // `读取文本` 等命令的结果先写进局部槽，执行完再落到 shell 上
+                let mut 返回值对象 = std::mem::take(&mut self.返回值对象);
                 let 状态 = {
                     let 壳本身 = &mut *self;
                     let mut 上下文 = 内置::上下文 {
@@ -410,6 +415,7 @@ impl 壳 {
                         退出: false,
                         目录栈: &mut 空栈,
                         执行脚本文件: &mut |文件| 壳本身.执行脚本文件(文件),
+                        返回值对象: &mut 返回值对象,
                     };
                     let 参数 = &片段.命令[0].参数列表[1..];
                     let 状态 = 内置命令.运行(参数, &mut 上下文);
@@ -419,11 +425,14 @@ impl 壳 {
                     }
                     状态
                 };
+                self.返回值对象 = 返回值对象;
+                self.同步返回值变量();
                 return 状态;
             }
 
             let mut 环境表 = self.变量快照();
             let mut 目录栈 = std::mem::take(&mut self.目录栈);
+            let mut 返回值对象 = std::mem::take(&mut self.返回值对象);
             let 状态;
             {
                 // 拆开借用：执行脚本的闭包需要 `&mut self`，环境表与目录栈则作为参数借出
@@ -434,6 +443,7 @@ impl 壳 {
                     退出: false,
                     目录栈: &mut 目录栈,
                     执行脚本文件: &mut |文件| 壳本身.执行脚本文件(文件),
+                    返回值对象: &mut 返回值对象,
                 };
                 let 参数 = &片段.命令[0].参数列表[1..];
                 状态 = 内置命令.运行(参数, &mut 上下文);
@@ -443,7 +453,9 @@ impl 壳 {
                 }
             }
             self.目录栈 = 目录栈;
+            self.返回值对象 = 返回值对象;
             self.变量 = self.合并内置修改(环境表);
+            self.同步返回值变量();
             return 状态;
         }
 
@@ -560,6 +572,24 @@ impl 壳 {
             结果.insert(键, 值);
         }
         结果
+    }
+
+    /// `读取文本` 的结果放到变量表：`$返回值对象` 原样取到，`$返回值JSON` 取 JSON 文本。
+    fn 同步返回值变量(&mut self) {
+        if self.返回值对象.is_empty() {
+            self.变量.remove("返回值对象");
+            self.变量.remove("返回值JSON");
+            return;
+        }
+        self.变量.insert("返回值对象".into(), self.返回值对象.clone());
+        match 值::值::读JSON(&self.返回值对象) {
+            Some(解析) => {
+                self.变量.insert("返回值JSON".into(), 解析.写JSON());
+            }
+            None => {
+                self.变量.remove("返回值JSON");
+            }
+        }
     }
 
     fn 变量快照(&self) -> Vec<(String, String)> {
