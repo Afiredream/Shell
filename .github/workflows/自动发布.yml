@@ -87,10 +87,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: 安装交叉编译链接器
+      - name: 安装交叉编译链接器与目标系统库
+        # 只装 gcc-aarch64-linux-gnu 不够：它依赖的 libc6-dev-arm64-cross 提供
+        # Scrt1.o、crti.o、libc.so 这些启动文件，CI 上默认不会装上，链接会报
+        # "cannot find Scrt1.o"。这里显式安装完整工具链。
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ matrix.arch == 'aarch64' && 'gcc-aarch64-linux-gnu' || 'gcc' }}
+          sudo apt-get install -y --no-install-recommends ${{ matrix.arch == 'aarch64' && 'gcc-aarch64-linux-gnu libc6-dev-arm64-cross binutils-aarch64-linux-gnu' || 'gcc libc6-dev' }}
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            echo "— 确认启动文件存在："
+            aarch64-linux-gnu-gcc -print-file-name=Scrt1.o
+            aarch64-linux-gnu-gcc -print-file-name=crti.o
+            test -e "$(aarch64-linux-gnu-gcc -print-file-name=Scrt1.o)" || { echo "::error::缺少 Scrt1.o"; exit 1; }
+          fi
 
       - name: 缓存依赖
         uses: Swatinem/rust-cache@v2
