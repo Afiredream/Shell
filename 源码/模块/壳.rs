@@ -718,6 +718,30 @@ mod 测试 {
     }
 
     #[test]
+    fn 特殊变量() {
+        let mut 实例 = 壳::新建();
+
+        // $? 取上一条命令的状态
+        实例.运行脚本文本("错误; 结果=$?");
+        assert_eq!(实例.变量.get("结果").map(String::as_str), Some("1"));
+
+        // $# $@ $* 来自位置参数
+        实例.设置位置参数("脚本", &["甲".into(), "乙".into()]);
+        实例.运行脚本文本("个数=$#; 全部=$@; 星=$*");
+        assert_eq!(实例.变量.get("个数").map(String::as_str), Some("2"));
+        assert_eq!(实例.变量.get("全部").map(String::as_str), Some("甲 乙"));
+        assert_eq!(实例.变量.get("星").map(String::as_str), Some("甲 乙"));
+
+        // $$ 是当前进程号
+        实例.运行脚本文本("进程=$$");
+        assert!(实例
+            .变量
+            .get("进程")
+            .map(|值| 值.parse::<u32>().is_ok())
+            .unwrap_or(false));
+    }
+
+    #[test]
     fn 命令替换展开变量() {
         // $(...) 里先用本 shell 的变量表展开，再交给 /bin/sh（sh 不认中文变量名）
         let mut 实例 = 壳::新建();

@@ -32,13 +32,35 @@ pub struct 释义器<'a> {
 
 impl<'a> 释义器<'a> {
     fn 查变量(&self, 名称: &str) -> Option<String> {
-        if 名称 == "?" {
-            return Some(self.最后状态.to_string());
+        match 名称 {
+            "?" => return Some(self.最后状态.to_string()),
+            "$" => return Some(std::process::id().to_string()),
+            "!" => return Some(super::执行::最后后台进程().to_string()),
+            "#" => return Some(self.位置参数().len().to_string()),
+            "@" | "*" => return Some(self.位置参数().join(" ")),
+            _ => {}
         }
         if let Some(值) = self.环境表.get(名称) {
             return Some(值.clone());
         }
         std::env::var(名称).ok()
+    }
+
+    /// 数字键（除 `0`）按序收集的位置参数。
+    fn 位置参数(&self) -> Vec<String> {
+        let mut 项: Vec<(u32, String)> = self
+            .环境表
+            .iter()
+            .filter_map(|(键, 值)| {
+                if 键 != "0" && !键.is_empty() && 键.bytes().all(|字| 字.is_ascii_digit()) {
+                    键.parse::<u32>().ok().map(|序| (序, 值.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        项.sort_by_key(|(序, _)| *序);
+        项.into_iter().map(|(_, 值)| 值).collect()
     }
 
     /// 展开一个词为若干实参（变量 / `~` / 通配）。

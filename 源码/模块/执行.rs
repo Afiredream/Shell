@@ -19,6 +19,14 @@ const 标准输入: 整数 = 0;
 const 标准输出: 整数 = 1;
 const 标准错误: 整数 = 2;
 
+use std::sync::atomic::{AtomicI32, Ordering};
+static 最后后台: AtomicI32 = AtomicI32::new(0);
+
+/// 最近一次后台作业的进程号（供 `$!` 使用）；没有则 0。
+pub fn 最后后台进程() -> 整数 {
+    最后后台.load(Ordering::Relaxed)
+}
+
 /// 一条准备执行的命令：程序（`参数列表[0]`）+ 参数 + 环境变量覆盖。
 pub struct 简易命令 {
     pub 参数列表: Vec<String>,
@@ -234,6 +242,9 @@ pub fn 运行管道(片段: &管道片段) -> Result<整数, 执行错误> {
     }
 
     if 片段.后台 {
+        if let Some(&最后) = 子进程号.last() {
+            最后后台.store(最后, Ordering::Relaxed);
+        }
         for 进程号 in &子进程号 {
             println!("[{进程号}] 已放入后台");
         }
