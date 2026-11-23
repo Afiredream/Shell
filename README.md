@@ -165,7 +165,7 @@ with this program.  If not, see <https://www.gnu.org/licenses/>.
   工作流自动编译并把安装包附加到该 Release；
 - **版本号一律读取 `Cargo.toml`**：自动与手动触发都一样，发布标签为 `v<版本号>`，无需手工填写；
   发版只需改 `Cargo.toml` 里的 `version`；
-- **可手动触发**：Actions →「自动发布 Linux 版本」→ Run workflow，只需选择是否顺手创建（或更新）对应的 Release；
+- **可手动触发**：Actions →「自动发布 Linux 版本」→ Run workflow，只需在 `create_release` 勾选框里选择是否顺手创建（或更新）对应的 Release；
 - 每次都会产出两个架构：`壳-<版本>-x86_64.tar.gz`（x86_64-unknown-linux-gnu）与
   `壳-<版本>-aarch64.tar.gz`（aarch64-unknown-linux-gnu，交叉编译），并附 `.sha256` 校验文件；
 - x86_64 的包会在运行器上实际跑一遍（`-c` 与 `-h`）作为自检；

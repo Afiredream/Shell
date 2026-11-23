@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     # 版本号一律读取 Cargo.toml，不再手工填写
     inputs:
-      创建Release:
+      create_release:
         description: "手动触发时，是否创建（或更新）对应的 Release"
         required: false
         type: boolean
@@ -155,7 +155,7 @@ jobs:
   publish:
     name: 发布到 GitHub Release
     needs: [prepare, build]
-    if: github.event_name == 'workflow_dispatch' && inputs.创建Release
+    if: github.event_name == 'workflow_dispatch' && inputs.create_release
     runs-on: ubuntu-latest
     steps:
       - name: 下载构建好的压缩包
