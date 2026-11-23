@@ -39,6 +39,7 @@ impl<'a> 释义器<'a> {
             "#" => return Some(self.参数个数().to_string()),
             "@" | "*" => return Some(self.参数列表().join(" ")),
             // 壳语言默认变量：位置参数按 `--`/`-` 分隔后再取值
+            "参数" => return Some(self.参数列表().into_iter().next().unwrap_or_default()),
             "参数列表" => return Some(self.参数列表().join(" ")),
             "参数个数" => return Some(self.参数个数().to_string()),
             "参数对象" => return Some(self.参数对象().写JSON()),

@@ -730,9 +730,10 @@ mod 测试 {
         let mut 实例 = 壳::新建();
         // 没有参数
         实例.设置位置参数("脚本", &[]);
-        实例.运行脚本文本("个数=$参数个数; 列表=[$参数列表]");
+        实例.运行脚本文本("个数=$参数个数; 列表=[$参数列表]; 首=[$参数]");
         assert_eq!(实例.变量.get("个数").map(String::as_str), Some("0"));
         assert_eq!(实例.变量.get("列表").map(String::as_str), Some("[]"));
+        assert_eq!(实例.变量.get("首").map(String::as_str), Some("[]"));
 
         // 选项、= 数据、-- 分隔、剩余
         实例.设置位置参数(
@@ -747,8 +748,9 @@ mod 测试 {
                 "剩余一".into(),
             ],
         );
-        实例.运行脚本文本("对象=$参数对象; 个数=$参数个数");
+        实例.运行脚本文本("对象=$参数对象; 个数=$参数个数; 首个=$参数");
         assert_eq!(实例.变量.get("个数").map(String::as_str), Some("7"));
+        assert_eq!(实例.变量.get("首个").map(String::as_str), Some("构建"));
         assert_eq!(
             实例.变量.get("对象").map(String::as_str),
             Some(
