@@ -132,3 +132,27 @@ user@host:~/demo$ echo "*.rs"
 - 交互模式没有行编辑（没有 readline），方向键/历史记录不可用。
 - 展开顺序与 bash 略有不同：`$变量` 展开出来的内容不会再被当作通配符解析；
   一个词里只要出现单引号就整词原样（单引号内 `$` 不展开），双引号内只展开变量。
+
+## 许可
+
+本项目采用 **GNU Affero 通用公共许可证第 3 版或任何更高版本**（AGPL-3.0-or-later）授权。
+
+```
+Copyright (C) 2026 Afiredream
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more
+details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program.  If not, see <https://www.gnu.org/licenses/>.
+```
+
+完整条文见 [LICENSE](LICENSE)。简单说：可以自由使用、修改、分发，但**分发时必须以 AGPL 开源**；
+第 13 条还要求，如果把修改后的版本作为网络服务提供给他人使用，也要向他们提供对应的源码。
