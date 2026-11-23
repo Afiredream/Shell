@@ -893,12 +893,12 @@ pub(crate) fn resolve_var(name: &str, lookup: &dyn Fn(&str) -> Option<String>) -
         return Some(value);
     };
     let mut current = Value::from_value_text(&value)?;
-    for seg in path.split('.') {
+    for seg in split_path(path) {
         let mut found = None;
         loop {
             match &current {
                 Value::Object(items) => {
-                    if let Some((_, v)) = items.iter().find(|(key, _)| key == seg) {
+                    if let Some((_, v)) = items.iter().find(|(key, _)| *key == seg) {
                         found = Some(v.clone());
                     } else if items.len() == 1 {
                         current = items.iter().next()?.1.clone();
@@ -915,6 +915,54 @@ pub(crate) fn resolve_var(name: &str, lookup: &dyn Fn(&str) -> Option<String>) -
         current = found?;
     }
     Some(current.to_text())
+}
+
+pub(crate) fn split_path(path: &str) -> Vec<String> {
+    let mut segs: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_quote: Option<char> = None;
+    let mut in_bracket = false;
+    let mut after_bracket = false;
+    let mut escaped = false;
+    for ch in path.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            after_bracket = false;
+            continue;
+        }
+        if ch == '\\' && in_quote.is_none() {
+            escaped = true;
+            continue;
+        }
+        match (in_quote, in_bracket, ch) {
+            (Some(quote), _, c) if c == quote => in_quote = None,
+            (Some(_), _, _) => current.push(ch),
+            (None, true, ']') => {
+                in_bracket = false;
+                after_bracket = true;
+                segs.push(std::mem::take(&mut current));
+            }
+            (None, true, _) => current.push(ch),
+            (None, false, '[') if current.is_empty() => in_bracket = true,
+            (None, false, '\'' | '"') if current.is_empty() => in_quote = Some(ch),
+            (None, false, '.') => {
+                if !after_bracket {
+                    segs.push(std::mem::take(&mut current));
+                }
+                after_bracket = false;
+            }
+            (None, false, _) => {
+                after_bracket = false;
+                current.push(ch);
+            }
+        }
+    }
+    if !current.is_empty() {
+        segs.push(current);
+    }
+    segs.retain(|seg| !seg.is_empty());
+    segs
 }
 
 #[allow(clippy::type_complexity)]
@@ -994,7 +1042,7 @@ pub(crate) fn expand_vars(
                 cursor = name_end;
             }
             
-            Some(&special) if matches!(special, '?' | '$' | '!' | '#' | '@' | '*') => {
+            Some(&special) if matches!(special, '?' | '$' | '!' | '#') => {
                 result.push_str(&lookup(&special.to_string()).unwrap_or_default());
                 cursor += 2;
             }
@@ -1088,6 +1136,20 @@ mod lexer_tests {
             .iter()
             .flat_map(|word| expand_word(word, &test_var, &|_, _| String::new()))
             .collect()
+    }
+
+    #[test]
+    fn var_path_segments() {
+        let source: &str = "{InternetShortcut={URL=\"https://example.com\"} \"甲.乙\"=值}";
+        let lookup = |key: &str| match key {
+            "对象" => Some(source.to_string()),
+            _ => None,
+        };
+        assert_eq!(resolve_var("对象.InternetShortcut.URL", &lookup).as_deref(), Some("https://example.com"));
+        assert_eq!(split_path("[InternetShortcut].URL"), ["InternetShortcut", "URL"]);
+        assert_eq!(resolve_var("对象.[InternetShortcut].URL", &lookup).as_deref(), Some("https://example.com"));
+        assert_eq!(resolve_var("对象.甲\\.乙", &lookup).as_deref(), Some("值"));
+        assert_eq!(resolve_var("对象.不存在.URL", &lookup), None);
     }
 
     #[test]
