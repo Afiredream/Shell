@@ -14,6 +14,31 @@ pub(crate) const STDERR: c_int = 2;
 
 pub(crate) static LAST_BACKGROUND: AtomicI32 = AtomicI32::new(0);
 
+pub(crate) fn clean_reserved_env() {
+    for name in ["参数", "参数个数", "参数列表", "参数对象", "脚本路径", "脚本目录", "当前目录"] {
+        std::env::remove_var(name);
+    }
+    for (name, _) in std::env::vars_os() {
+        match name.into_string() {
+            Ok(name) => {
+                if !valid_env_name(&name) {
+                    std::env::remove_var(name);
+                }
+            }
+            Err(name) => std::env::remove_var(name),
+        }
+    }
+}
+
+pub(crate) fn valid_env_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    match bytes.next() {
+        Some(first) if first == b'_' || first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+}
+
 pub(crate) fn last_background_pid() -> c_int {
     LAST_BACKGROUND.load(Ordering::Relaxed)
 }
@@ -120,6 +145,7 @@ pub(crate) fn run_single(commands: &SimpleCmd) -> Result<c_int, ExecError> {
     for (key, val) in &commands.env {
         child.env(key, val);
     }
+    clean_reserved_env();
     let status_out = child.status().map_err(|source| match source.kind() {
         std::io::ErrorKind::NotFound => ExecError::NotFound(program_name.clone()),
         std::io::ErrorKind::PermissionDenied => {
@@ -163,6 +189,8 @@ pub(crate) fn run_pipeline_ext(spec: &PipelineSpec) -> Result<c_int, ExecError> 
         .transpose()?;
 
     
+    // 子进程一关完管道就会 execvp，否则会把含 `%%`/数字开头的变量原样交给 systemd 类服务
+    clean_reserved_env();
     let mut pipe_table: Vec<[c_int; 2]> = Vec::new();
     for _ in 0..count.saturating_sub(1) {
         let mut fds: [c_int; 2] = [0, 0];
@@ -272,6 +300,10 @@ pub(crate) fn exec_child(commands: &SimpleCmd) -> ! {
 
     
     
+    if !commands.env.is_empty() {
+        clean_reserved_env();
+    }
+
     if commands.builtin {
         let builtin = find_by_name(&program_name).expect("释义层已确认是内置命令");
         
@@ -558,4 +590,19 @@ pub(crate) fn open_fd(path: &str, flags: c_int, needs_mode: bool) -> Result<c_in
 
 pub(crate) fn write_stderr(text: &str) {
     sys_write(STDERR, text.as_ptr().cast(), text.len());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_name_rules() {
+        for name in ["PATH", "_x", "a1", "A_B", "1password"] {
+            assert_eq!(valid_env_name(name), name != "1password", "{name}");
+        }
+        for name in ["BASH_FUNC_ls%%", "", "1x", "A-B", "中文", "A.B"] {
+            assert_eq!(valid_env_name(name), false, "{name}");
+        }
+    }
 }
