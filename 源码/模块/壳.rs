@@ -79,6 +79,15 @@ impl 壳 {
         self.最后状态
     }
 
+    /// 给脚本设置位置参数：脚本路径是 `$0`，后面的参数依次是 `$1`、`$2`……
+    /// 位置参数只在 shell 内部可见，不写进进程环境（与 bash 一致）。
+    pub fn 设置位置参数(&mut self, 脚本路径: &str, 参数: &[String]) {
+        self.变量.insert("0".into(), 脚本路径.into());
+        for (序号, 值) in 参数.iter().enumerate() {
+            self.变量.insert((序号 + 1).to_string(), 值.clone());
+        }
+    }
+
     pub fn 问候(&self) {
         println!(
             "壳 v{}（壳语言）—— 输入 help 查看用法，Ctrl-D 退出。",
@@ -244,4 +253,22 @@ fn 短目录() -> String {
         }
     }
     当前目录
+}
+
+#[cfg(test)]
+mod 测试 {
+    use super::*;
+
+    #[test]
+    fn 脚本位置参数() {
+        let mut 实例 = 壳::新建();
+        let 原有一 = std::env::var_os("1");
+        实例.设置位置参数("脚本.壳", &["甲".into(), "乙".into()]);
+        assert_eq!(实例.变量.get("0").map(String::as_str), Some("脚本.壳"));
+        assert_eq!(实例.变量.get("1").map(String::as_str), Some("甲"));
+        assert_eq!(实例.变量.get("2").map(String::as_str), Some("乙"));
+        assert!(实例.变量.get("3").is_none());
+        // 位置参数只在 shell 内部，不写进进程环境
+        assert_eq!(std::env::var_os("1"), 原有一);
+    }
 }

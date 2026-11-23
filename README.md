@@ -11,7 +11,7 @@ user@host:~$ echo 你好 | tr -d '\n'; echo 世界
 你好世界
 user@host:~$ ls /不存在的 2>&1 | wc -l
 1
-user@host:~$ echo 追加 >> 笔记.txt &
+user@host:~$ 异步运行 echo 追加 >> 笔记.txt
 [4242] 已放入后台
 ```
 
@@ -23,7 +23,7 @@ user@host:~$ echo 追加 >> 笔记.txt &
 | --- | --- |
 | 管道 | `a \| b \| c`、`a \|& b`（stderr 也进管道）、`a 2>&1 \| b` |
 | 重定向 | `>` `>>` `<`、`2>` `2>>`、`2>&1`、`&>` `&>>`（stdout+stderr 一起） |
-| 后台 | `cmd &`（自成进程组，退出 shell 后不会被挂起） |
+| 后台 | `异步运行 cmd 参数`（旧写法 `cmd &` 仍可用；自成进程组，退出 shell 后不会被挂起） |
 | 分隔 | `;`、换行、行尾 `\` 续行 |
 | 引号 | `'...'` 原样；`"..."` 里 `$变量` 照常展开、空白不切分；`\` 转义 |
 | 展开 | `$变量`、`${变量}`、`$?`、`~`、`~/路径`、`*`、`?`、`[abc]`、`[!abc]` |
@@ -33,6 +33,8 @@ user@host:~$ echo 追加 >> 笔记.txt &
 
 内置命令：`进入目录`（支持 `进入目录 -`）、`压栈目录`、`弹栈目录`、`打印目录`、`环境变量`、`unset`、
 `加载脚本`、`echo [-n] [-e]`、`help`、`true`、`false`、`退出进程 [码]`；`cd`/`pushd`/`popd`/`pwd`/`export`/`env`/`source`/`exit` 作为旧名保留。
+
+直接运行脚本：`壳 脚本文件 参数...` 逐行执行文件，参数可用 `$1`、`$2`…… 取到（`$0` 是脚本名）。
 
 ## 目录约定
 
@@ -99,11 +101,22 @@ user@host:~$ echo 追加 >> 笔记.txt &
 
 ```sh
 cargo build --release          # 产物：构建/release/壳
-cargo test                     # 词法、展开、引号的单元测试（15 项）
+cargo test                     # 词法、展开、引号的单元测试（23 项）
 cargo clippy                   # 静态检查（0 警告）
 cargo run                      # 交互模式（提示符需要真实终端）
 cargo run -- -c 'ls | wc -l'   # 执行一条命令
 ```
+
+也可以用 `make`（见 [Makefile](Makefile)）：
+
+```sh
+make                           # 等价于 make 检查 测试 构建
+make 安装                      # 构建后把「壳」装到 ~/bin/壳
+make 卸载                      # 删除 ~/bin/壳
+make 安装 安装目录=/别的/目录   # 换安装位置
+```
+
+`make install` / `make uninstall` 是 `make 安装` / `make 卸载` 的英文别名。
 
 ## 一个完整的会话示例
 
@@ -185,6 +198,8 @@ sha256sum -c shell-0.1.0-linux-x86_64.sha256
 sudo install -m 755 shell-0.1.0-linux-x86_64 /usr/local/bin/壳
 壳 -c 'echo 你好 | tr a-z A-Z'
 ```
+
+本地源码构建则不用下载：`make 安装` 会把「壳」装到 `~/bin/壳`。
 
 发版步骤（本地）：
 
