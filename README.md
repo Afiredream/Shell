@@ -165,7 +165,7 @@ with this program.  If not, see <https://www.gnu.org/licenses/>.
   工作流自动编译并把可执行文件附加到该 Release；
 - **版本号一律读取 `Cargo.toml`**：自动与手动触发都一样，发布标签为 `v<版本号>`，无需手工填写；
   发版只需改 `Cargo.toml` 里的 `version`；
-- **可手动触发**：Actions →「自动发布 Linux 版本」→ Run workflow，只需在 `create_release` 勾选框里选择是否顺手创建（或更新）对应的 Release；
+- **可手动触发**：Actions →「自动发布」→ Run workflow，只需在 `create_release` 勾选框里选择是否顺手创建（或更新）对应的 Release；
 - 只发布 **x86_64 的单个可执行文件**，不打包压缩：
   `shell-<版本>-linux-x86_64` 与同名 `.sha256`（文件名用 ASCII，便于 `curl`/`wget` 直接下载；程序本身仍叫「壳」）；
 - 编译出的可执行文件会在运行器上实际跑一遍（`-c` 与 `-h`）作为自检；
