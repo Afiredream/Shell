@@ -369,7 +369,7 @@ pub(crate) fn read_ini(text: &str) -> Value {
             continue;
         }
         if let Some(seg) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
-            section_name = seg.trim().to_string();
+            section_name = strip_ws(seg);
             if !sections.iter().any(|(entry_name, _)| *entry_name == section_name) {
                 sections.push((section_name.clone(), Vec::new()));
             }
@@ -378,7 +378,7 @@ pub(crate) fn read_ini(text: &str) -> Value {
         let Some((key, raw)) = line.split_once('=') else {
             continue;
         };
-        let key = key.trim().to_string();
+        let key = strip_ws(key);
         let val = ini_value(strip_trailing_comment(raw.trim()));
         let seg = sections
             .iter_mut()
@@ -397,6 +397,10 @@ pub(crate) fn read_ini(text: &str) -> Value {
             .map(|(entry_name, key_values)| (entry_name, Value::Object(key_values)))
             .collect(),
     )
+}
+
+pub(crate) fn strip_ws(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
 pub(crate) fn strip_trailing_comment(raw: &str) -> &str {

@@ -894,6 +894,7 @@ pub(crate) fn resolve_var(name: &str, lookup: &dyn Fn(&str) -> Option<String>) -
     };
     let mut current = Value::from_value_text(&value)?;
     for seg in split_path(path) {
+        let seg = seg.replace(char::is_whitespace, "");
         let mut found = None;
         loop {
             match &current {
@@ -961,8 +962,7 @@ pub(crate) fn split_path(path: &str) -> Vec<String> {
     if !current.is_empty() {
         segs.push(current);
     }
-    segs.retain(|seg| !seg.is_empty());
-    segs
+    segs.iter().map(|seg| seg.replace(char::is_whitespace, "")).filter(|seg| !seg.is_empty()).collect()
 }
 
 #[allow(clippy::type_complexity)]
@@ -1136,6 +1136,25 @@ mod lexer_tests {
             .iter()
             .flat_map(|word| expand_word(word, &test_var, &|_, _| String::new()))
             .collect()
+    }
+
+    #[test]
+    fn var_path_ignores_space() {
+        let source = "{DesktopEntry={Exec=\"/usr/bin/app %U\"}}";
+        let lookup = |key: &str| match key {
+            "对象" => Some(source.to_string()),
+            _ => None,
+        };
+        for path in ["对象.[DesktopEntry].Exec", "对象.\"DesktopEntry\".Exec"] {
+            assert_eq!(resolve_var(path, &lookup).as_deref(), Some("/usr/bin/app %U"), "{path}");
+        }
+        assert_eq!(assert_space_segment().as_str(), "DesktopEntry");
+    }
+
+    fn assert_space_segment() -> String {
+        let segments = split_path("[ Desktop  Entry ]");
+        assert_eq!(segments, ["DesktopEntry"]);
+        segments.concat()
     }
 
     #[test]
