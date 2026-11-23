@@ -288,6 +288,15 @@ fn 替换运行(命令: &简易命令) -> ! {
     // （其中的 `进入`、`压栈`、`变量` 只影响这个子进程）
     if 命令.内置 {
         let 内置命令 = 内置::按名称查找(&程序名).expect("释义层已确认是内置命令");
+        // `导入` 在主进程里另有高速实现；走到这里说明是管道/后台里的子进程，
+        // 主进程那套回调拿不到，说明一下而不是静默失败
+        if matches!(内置命令, 内置::内置命令::加载脚本) && !程序名.starts_with('.') {
+            let 提示 = "导入: 不支持在管道/后台里执行。\n";
+            unsafe {
+                libc::write(2, 提示.as_ptr().cast(), 提示.len());
+                libc::_exit(1);
+            }
+        }
         // 只影响本子进程（分叉之后设置变量不会传回 shell）
         for (键, 值) in &命令.环境 {
             std::env::set_var(键, 值);
@@ -442,6 +451,66 @@ impl 重定向守护 {
             Ok(())
         })()?;
         Ok(守护)
+    }
+}
+
+/// 把本进程标准输出接到一个内存管道上（命令替换用）：
+/// 管道读端在后台线程里读空，`取走()` 等待写完并返回字节。
+pub struct 输出捕获 {
+    备份: 整数,
+    读线程: Option<std::thread::JoinHandle<Vec<u8>>>,
+}
+
+impl 输出捕获 {
+    pub fn 开始() -> Result<Self, 执行错误> {
+        let mut 管道: [整数; 2] = [0, 0];
+        if 系统::创建管道(管道.as_mut_ptr()) != 0 {
+            return Err(执行错误::无法创建管道(std::io::Error::last_os_error()));
+        }
+        // 读端交给线程；写端替换 1 号描述符（替换后马上关掉，读线程用不到它）
+        use std::os::unix::io::FromRawFd;
+        let 读端 = unsafe { std::fs::File::from_raw_fd(管道[0]) };
+        let 备份 = 系统::复制描述符(标准输出);
+        if 系统::重定向描述符(管道[1], 标准输出) < 0 {
+            系统::关闭描述符(管道[1]);
+            return Err(执行错误::无法复制描述符(std::io::Error::last_os_error()));
+        }
+        系统::关闭描述符(管道[1]);
+        // 读端已交给 读端（File 拥有），不能再手动关，否则 IO 安全检查会中止进程
+        let 读线 = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut 文件 = 读端;
+            let mut 数据 = Vec::new();
+            let _ = 文件.read_to_end(&mut 数据);
+            数据
+        });
+        Ok(Self {
+            备份,
+            读线程: Some(读线),
+        })
+    }
+
+    /// 恢复标准输出，等读线程读到 EOF 后取走全部字节。
+    pub fn 取走(mut self) -> Vec<u8> {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        系统::重定向描述符(self.备份, 标准输出);
+        系统::关闭描述符(self.备份);
+        self.备份 = -1;
+        match self.读线程.take() {
+            Some(线) => 线.join().unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+}
+
+impl Drop for 输出捕获 {
+    fn drop(&mut self) {
+        if self.备份 >= 0 {
+            系统::重定向描述符(self.备份, 标准输出);
+            系统::关闭描述符(self.备份);
+            self.备份 = -1;
+        }
     }
 }
 

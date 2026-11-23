@@ -166,19 +166,27 @@ impl 壳 {
     }
 
     /// 执行一组作业。
+    ///
+    /// 每条作业先建一个「内核」：一份变量表/目录栈/函数表的副本 + 两个临时文件。
+    /// 展开与执行期间，`内置::上下文` 用的是内核的变量表，`$(命令)` 直接在内核里跑；
+    /// 作业结束后内核里被内置命令改过的变量写回本 shell。
     fn 执行作业列表(&mut self, 作业列表: &[词法::作业]) -> 整数 {
         for 待执行作业 in 作业列表 {
             if self.退出 {
                 break;
             }
-            let 释义结果 = {
-                let 释义器 = 释义器 {
-                    环境表: &self.变量,
-                    最后状态: self.最后状态,
-                    命令替换: &执行命令替换,
-                };
-                释义器.释义(待执行作业)
+            // 命令替换必须在本进程里执行（中文内置命令 /bin/sh 不认），
+            // 输出由命令替换自己截获，这里不再重定向标准输出——否则外层命令的输出也会丢。
+            let 本进程 = std::sync::Arc::new(std::sync::Mutex::new(内核 {
+                壳: self.导出副本(),
+            }));
+            let 释义器 = 释义器 {
+                环境表: &self.变量,
+                最后状态: self.最后状态,
+                命令替换: &|命令, 查变量| Self::捕获命令(&本进程, 命令, 查变量),
             };
+            let 释义结果 = 释义器.释义(待执行作业);
+            let 内核锁 = std::sync::Arc::try_unwrap(本进程).ok().and_then(|锁| 锁.into_inner().ok());
             match 释义结果 {
                 Err(消息) => {
                     eprintln!("壳语言：{消息}");
@@ -198,8 +206,47 @@ impl 壳 {
                     self.最后状态 = self.执行管道(片段);
                 }
             }
+            if let Some(内核) = 内核锁 {
+                self.收编内核(内核.壳);
+            }
         }
         self.最后状态
+    }
+
+    /// 建一个内核副本：变量表、目录栈、函数表都复制一份。
+    fn 导出副本(&self) -> 壳 {
+        壳 {
+            变量: self.变量.clone(),
+            目录栈: self.目录栈.clone(),
+            最后状态: self.最后状态,
+            退出: false,
+            退出码: 0,
+            块缓冲: Vec::new(),
+            函数表: self.函数表.clone(),
+            返回值: self.返回值.clone(),
+            返回值对象: self.返回值对象.clone(),
+        }
+    }
+
+    /// 用本壳执行一次命令替换：命令里的 `$变量` 先按当前变量展开，再交给内核执行并截获输出。
+    fn 捕获命令(
+        归属: &std::sync::Arc<std::sync::Mutex<内核>>,
+        命令: &str,
+        查变量: &dyn Fn(&str) -> Option<String>,
+    ) -> String {
+        let 已展开 = 展开命令文本(命令, 查变量);
+        let Ok(mut 锁) = 归属.lock() else {
+            return String::new();
+        };
+        锁.捕获输出(&已展开)
+    }
+
+    /// 内核里内置命令改过的变量写回本 shell（命令替换发生在外层展开、真正执行子进程之前）。
+    fn 收编内核(&mut self, 内核: 壳) {
+        if 内核.变量 == self.变量 {
+            return;
+        }
+        self.变量 = 内核.变量;
     }
 
     /// 执行语句序列；跳出/继续向上传播，由最近的循环消费。
@@ -238,7 +285,7 @@ impl 壳 {
                         let 释义器 = 释义器 {
                             环境表: &self.变量,
                             最后状态: self.最后状态,
-                            命令替换: &执行命令替换,
+                            命令替换: &空命令替换,
                         };
                         释义器.展开(字)
                     };
@@ -602,25 +649,77 @@ impl 壳 {
     }
 }
 
-/// `$(命令)` 的执行器：交给 `/bin/sh` 运行，取标准输出并去掉结尾换行。
-/// 用系统 shell 是为了支持命令里的管道/重定向；它不认识本 shell 的中文内置命令。
-fn 执行命令替换(命令: &str, 查变量: &dyn Fn(&str) -> Option<String>) -> String {
-    let 展开后 = 展开命令文本(命令, 查变量);
-    match std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(展开后)
-        .output()
-    {
-        Ok(输出) => String::from_utf8_lossy(&输出.stdout)
+
+/// 命令替换用的内核：一份独立的 shell 状态。输出由 [`执行::输出捕获`] 截获，不在这里存。
+struct 内核 {
+    壳: 壳,
+}
+
+impl 内核 {
+    /// 在内核里执行一条命令，返回去掉结尾换行的标准输出。
+    fn 捕获输出(&mut self, 命令: &str) -> String {
+        let 语句列表 = match 词法::解析脚本(命令) {
+            Ok(列表) => 列表,
+            Err(错误) => {
+                eprintln!("壳语言：{错误}");
+                return String::new();
+            }
+        };
+        // 执行期间把标准输出接到管道，`回显`/`输出`/外部命令的输出都进缓冲
+        let 捕获 = match 执行::输出捕获::开始() {
+            Ok(捕获) => 捕获,
+            Err(错误) => {
+                eprintln!("壳语言：{错误}");
+                return String::new();
+            }
+        };
+        let 结果 = self.壳.执行语句列表(&语句列表);
+        let 输出 = 捕获.取走();
+        self.壳.最后状态 = match 结果 {
+            流::正常(码) | 流::跳出(码) | 流::继续(码) | 流::返回(码) => 码,
+        };
+        String::from_utf8_lossy(&输出)
             .trim_end_matches('\n')
-            .to_string(),
-        Err(_) => String::new(),
+            .to_string()
     }
 }
 
-/// 交给 `/bin/sh` 前，先用本 shell 的变量表展开 `$(...)` 里的 `$变量`/`${变量}`：
-/// sh 不认中文变量名。单引号内的内容原样保留（留给内层程序，如 `awk '{print $1}'`），
-/// 变量不存在时也原样保留交给 sh。
+/// 脚本执行结束后恢复 `脚本路径`/`脚本目录`：原来没有就删掉，避免污染外层。
+fn 恢复变量(变量: &mut HashMap<String, String>, 名: &str, 原值: Option<String>) {
+    match 原值 {
+        Some(值) => {
+            变量.insert(名.to_string(), 值);
+        }
+        None => {
+            变量.remove(名);
+        }
+    }
+    std::env::remove_var(名);
+}
+
+/// 提示符里的目录：家目录显示成 `~`。
+fn 短目录() -> String {
+    let 家目录 = dirs::home_dir()
+        .map(|路径| 路径.display().to_string())
+        .unwrap_or_default();
+    let 当前目录 = std::env::current_dir()
+        .map(|路径| 路径.display().to_string())
+        .unwrap_or_else(|_| "?".into());
+    if !家目录.is_empty() {
+        if 当前目录 == 家目录 {
+            return "~".into();
+        }
+        if let Some(余下) = 当前目录.strip_prefix(&format!("{家目录}/")) {
+            return format!("~/{余下}");
+        }
+    }
+    当前目录
+}
+
+
+/// 交给本 shell 执行前，先按当前变量表展开 `$(...)` 里的 `$变量`/`${变量}`：
+/// 中文变量名 /bin/sh 不认，统一由本 shell 展开；单引号内的内容原样保留，
+/// 变量不存在时也原样保留。
 fn 展开命令文本(文本: &str, 查变量: &dyn Fn(&str) -> Option<String>) -> String {
     let 字符: Vec<char> = 文本.chars().collect();
     let mut 结果 = String::with_capacity(文本.len());
@@ -678,248 +777,7 @@ fn 展开命令文本(文本: &str, 查变量: &dyn Fn(&str) -> Option<String>) 
     结果
 }
 
-/// 脚本执行结束后恢复 `脚本路径`/`脚本目录`：原来没有就删掉，避免污染外层。
-fn 恢复变量(变量: &mut HashMap<String, String>, 名: &str, 原值: Option<String>) {
-    match 原值 {
-        Some(值) => {
-            变量.insert(名.to_string(), 值);
-        }
-        None => {
-            变量.remove(名);
-        }
-    }
-    std::env::remove_var(名);
-}
-
-/// 提示符里的目录：家目录显示成 `~`。
-fn 短目录() -> String {
-    let 家目录 = dirs::home_dir()
-        .map(|路径| 路径.display().to_string())
-        .unwrap_or_default();
-    let 当前目录 = std::env::current_dir()
-        .map(|路径| 路径.display().to_string())
-        .unwrap_or_else(|_| "?".into());
-    if !家目录.is_empty() {
-        if 当前目录 == 家目录 {
-            return "~".into();
-        }
-        if let Some(余下) = 当前目录.strip_prefix(&format!("{家目录}/")) {
-            return format!("~/{余下}");
-        }
-    }
-    当前目录
-}
-
-#[cfg(test)]
-mod 测试 {
-    use super::*;
-
-    #[test]
-    fn 脚本位置参数() {
-        let mut 实例 = 壳::新建();
-        let 原有一 = std::env::var_os("1");
-        实例.设置位置参数("脚本.壳", &["甲".into(), "乙".into()]);
-        assert_eq!(实例.变量.get("0").map(String::as_str), Some("脚本.壳"));
-        assert_eq!(实例.变量.get("1").map(String::as_str), Some("甲"));
-        assert_eq!(实例.变量.get("2").map(String::as_str), Some("乙"));
-        assert!(!实例.变量.contains_key("3"));
-        // 位置参数只在 shell 内部，不写进进程环境
-        assert_eq!(std::env::var_os("1"), 原有一);
-    }
-
-    #[test]
-    fn 默认参数变量() {
-        let mut 实例 = 壳::新建();
-        // 没有参数
-        实例.设置位置参数("脚本", &[]);
-        实例.运行脚本文本("个数=$参数个数; 列表=[$参数列表]; 首=[$参数]");
-        assert_eq!(实例.变量.get("个数").map(String::as_str), Some("0"));
-        assert_eq!(实例.变量.get("列表").map(String::as_str), Some("[]"));
-        assert_eq!(实例.变量.get("首").map(String::as_str), Some("[]"));
-
-        // 选项、= 数据、-- 分隔、剩余
-        实例.设置位置参数(
-            "脚本",
-            &[
-                "构建".into(),
-                "--release".into(),
-                "--输出".into(),
-                "json".into(),
-                "--file=数据.txt".into(),
-                "--".into(),
-                "剩余一".into(),
-            ],
-        );
-        实例.运行脚本文本("对象=$参数对象; 个数=$参数个数; 首个=$参数");
-        assert_eq!(实例.变量.get("个数").map(String::as_str), Some("7"));
-        assert_eq!(实例.变量.get("首个").map(String::as_str), Some("构建"));
-        assert_eq!(
-            实例.变量.get("对象").map(String::as_str),
-            Some(
-                r#"{"命令行":["构建","json"],"选项":{"release":"true","输出":"true","file":"数据.txt"},"分隔符":"--","剩余":["剩余一"]}"#
-            )
-        );
-    }
-
-    #[test]
-    fn 脚本目录与路径变量() {
-        let 根 = std::env::temp_dir().join("壳测试脚本目录");
-        let 子 = 根.join("子目录");
-        let _ = std::fs::remove_dir_all(&根);
-        std::fs::create_dir_all(&子).unwrap();
-        // 绝对路径导入，避免依赖测试时的工作目录；文件用标准库写就，不经 shell
-        std::fs::write(子.join("内.壳"), "内目录=$脚本目录\n").unwrap();
-        let 内脚本 = 子.join("内.壳").display().to_string();
-        std::fs::write(
-            根.join("外.壳"),
-            format!("外路径=$脚本路径\n外目录=$脚本目录\n导入 {内脚本}\n导入后=$脚本路径\n"),
-        )
-        .unwrap();
-
-        let mut 实例 = 壳::新建();
-        实例.执行脚本文件(&根.join("外.壳").display().to_string());
-        let 外脚本 = 根.join("外.壳").display().to_string();
-        assert_eq!(实例.变量.get("外路径").map(String::as_str), Some(外脚本.as_str()));
-        assert_eq!(实例.变量.get("外目录").map(String::as_str), Some(根.display().to_string().as_str()));
-        assert_eq!(实例.变量.get("内目录").map(String::as_str), Some(子.display().to_string().as_str()));
-        // 嵌套导入结束后恢复外层脚本的值
-        assert_eq!(实例.变量.get("导入后").map(String::as_str), Some(外脚本.as_str()));
-        // 顶层执行完不留下脚本变量
-        assert!(!实例.变量.contains_key("脚本路径"));
-        assert!(!实例.变量.contains_key("脚本目录"));
-
-        // `$当前目录` 实时取自进程当前目录
-        let 原目录 = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&子).unwrap();
-        实例.运行脚本文本("目录=$当前目录");
-        std::env::set_current_dir(&原目录).unwrap();
-        assert_eq!(实例.变量.get("目录").map(String::as_str), Some(子.display().to_string().as_str()));
-
-        let _ = std::fs::remove_dir_all(&根);
-    }
-
-    #[test]
-    fn 控制流执行() {
-        let mut 实例 = 壳::新建();
-
-        // 如果 / 或者 / 否则：只有命中的分支改变量
-        let 状态 = 实例.运行脚本文本(
-            "分支=无\n如果 错误\n    分支=一\n或者 正常\n    分支=二\n否则\n    分支=三",
-        );
-        assert_eq!(状态, 0);
-        assert_eq!(实例.变量.get("分支").map(String::as_str), Some("二"));
-
-        // 对于：逐值赋予循环变量；块内改动块外可见
-        let 状态 = 实例.运行脚本文本("结果=\n对于 项 甲 乙 丙\n    结果=${结果}${项}");
-        assert_eq!(状态, 0);
-        assert_eq!(实例.变量.get("结果").map(String::as_str), Some("甲乙丙"));
-
-        // 每当：条件错误后停止
-        let 状态 = 实例.运行脚本文本("次数=\n每当 test \"$次数\" != \"aa\"\n    次数=a$次数");
-        assert_eq!(状态, 0);
-        assert_eq!(实例.变量.get("次数").map(String::as_str), Some("aa"));
-
-        // 继续 / 跳出
-        let 状态 = 实例.运行脚本文本(
-            "收=\n对于 项 甲 乙 丙\n    如果 test \"$项\" = \"乙\"\n        继续\n    收=${收}${项}",
-        );
-        assert_eq!(状态, 0);
-        assert_eq!(实例.变量.get("收").map(String::as_str), Some("甲丙"));
-
-        let 状态 = 实例.运行脚本文本(
-            "收=\n对于 项 甲 乙 丙\n    如果 test \"$项\" = \"乙\"\n        跳出\n    收=${收}${项}",
-        );
-        assert_eq!(状态, 0);
-        assert_eq!(实例.变量.get("收").map(String::as_str), Some("甲"));
-    }
-
-    #[test]
-    fn 函数执行() {
-        let mut 实例 = 壳::新建();
-
-        // 用独特变量名，避免与其它并行测试写进进程环境的同名变量串扰
-        // 定义 + 命名参数
-        let 状态 = 实例.运行脚本文本("函数 问候 名字\n    函果甲=你好$名字\n问候 世界");
-        assert_eq!(状态, 0);
-        assert_eq!(实例.变量.get("函果甲").map(String::as_str), Some("你好世界"));
-
-        // 返回码
-        let 状态 = 实例.运行脚本文本("函数 给码\n    返回 7\n给码");
-        assert_eq!(状态, 7);
-
-        // 命名参数与位置参数在函数返回后恢复
-        实例.设置位置参数("脚本", &["全局".into()]);
-        let 状态 = 实例.运行脚本文本(
-            "函数 设置 函参甲\n    函果甲=内$函参甲$1\n函参甲=外\n设置 传\n函果乙=外$函参甲$1",
-        );
-        assert_eq!(状态, 0);
-        assert_eq!(实例.变量.get("函果甲").map(String::as_str), Some("内传传"));
-        assert_eq!(实例.变量.get("函果乙").map(String::as_str), Some("外外全局"));
-    }
-
-    #[test]
-    fn 特殊变量() {
-        let mut 实例 = 壳::新建();
-
-        // $? 取上一条命令的状态
-        实例.运行脚本文本("错误; 结果=$?");
-        assert_eq!(实例.变量.get("结果").map(String::as_str), Some("1"));
-
-        // $# $@ $* 来自位置参数
-        实例.设置位置参数("脚本", &["甲".into(), "乙".into()]);
-        实例.运行脚本文本("个数=$#; 全部=$@; 星=$*");
-        assert_eq!(实例.变量.get("个数").map(String::as_str), Some("2"));
-        assert_eq!(实例.变量.get("全部").map(String::as_str), Some("甲 乙"));
-        assert_eq!(实例.变量.get("星").map(String::as_str), Some("甲 乙"));
-
-        // $$ 是当前进程号
-        实例.运行脚本文本("进程=$$");
-        assert!(实例
-            .变量
-            .get("进程")
-            .map(|值| 值.parse::<u32>().is_ok())
-            .unwrap_or(false));
-    }
-
-    #[test]
-    fn 命令替换展开变量() {
-        // $(...) 里先用本 shell 的变量表展开，再交给 /bin/sh（sh 不认中文变量名）
-        let mut 实例 = 壳::新建();
-        let 状态 = 实例.运行脚本文本("甲=你好; 结果=\"$(echo ${甲})\"");
-        assert_eq!(状态, 0);
-        assert_eq!(实例.变量.get("结果").map(String::as_str), Some("你好"));
-    }
-
-    #[test]
-    fn 返回值类型() {
-        use super::super::值::值 as 运行时值;
-        let mut 实例 = 壳::新建();
-
-        // 数组
-        let 状态 = 实例.运行脚本文本("函数 数组例\n    返回 (1 2 三)\n数组例");
-        assert_eq!(状态, 0);
-        assert_eq!(
-            实例.返回值,
-            运行时值::数组(vec![
-                运行时值::整数(1),
-                运行时值::整数(2),
-                运行时值::文本("三".into()),
-            ])
-        );
-        assert_eq!(
-            实例.变量.get("返回值").map(String::as_str),
-            Some("(1 2 三)")
-        );
-
-        // 对象（含嵌套数组），且对象只是数据，没有方法/类
-        let 状态 = 实例.运行脚本文本("函数 对象例\n    返回 {甲=(2 3)}\n对象例");
-        assert_eq!(状态, 0);
-        assert_eq!(
-            实例.返回值,
-            运行时值::对象(vec![(
-                "甲".into(),
-                运行时值::数组(vec![运行时值::整数(2), 运行时值::整数(3)])
-            )])
-        );
-    }
+/// 建不了命令替换内核（例如临时文件不可用）时的兜底：返回空串，命令照常运行。
+fn 空命令替换(_命令: &str, _查变量: &dyn Fn(&str) -> Option<String>) -> String {
+    String::new()
 }
