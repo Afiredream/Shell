@@ -24,8 +24,10 @@ pub struct 上下文<'a> {
     /// 执行脚本文件：由 shell 调度层提供，`加载脚本` 用它逐行执行脚本。
     /// 需要可变访问（改变量、改目录），所以是 `FnMut`。
     pub 执行脚本文件: &'a mut dyn FnMut(&str) -> 整数,
-    /// 最近一次 `读取文本` 的结果，写成可再被解析的表达式文本（对象/数组/文本/整数）
+    /// 最近一次 `读取文本`/`读取文件` 的解析结果，写成可再被解析的表达式文本
     pub 返回值对象: &'a mut String,
+    /// 命令的标准输入是否为管道（只有这时 `读取文件` 才从标准输入读）
+    pub 标准输入是管道: bool,
 }
 
 impl 上下文<'_> {
@@ -59,7 +61,8 @@ pub enum 内置命令 {
     真,
     假,
     处理环境变量,
-    读取文本,
+    读取文件,
+    覆写文件,
 }
 
 /// 关键字 → 内置命令，全部用两字中文名。
@@ -77,7 +80,9 @@ const 全部: &[(&str, 内置命令)] = &[
     ("帮助", 内置命令::显示帮助),
     ("正常", 内置命令::真),
     ("错误", 内置命令::假),
-    ("读取文本", 内置命令::读取文本),
+    ("读取文本", 内置命令::读取文件),
+    ("读取文件", 内置命令::读取文件),
+    ("覆写文件", 内置命令::覆写文件),
 ];
 
 /// 按命令行里敲的名字查内置命令。
@@ -118,7 +123,8 @@ impl 内置命令 {
                 0
             }
             Self::替换运行 => 替换运行命令(参数),
-            Self::读取文本 => Self::执行读取文本(参数, 上下文),
+            Self::读取文件 => Self::执行读取文件(参数, 上下文),
+            Self::覆写文件 => Self::执行覆写文件(参数, 上下文),
             Self::显示帮助 => {
                 帮助();
                 0
@@ -228,51 +234,76 @@ impl 内置命令 {
         状态
     }
 
-    /// `读取文本 文件 [--类型 类型]`：按类型解析文件内容，结果放入 `$返回值对象`。
+    /// `读取文本` / `读取文件`：同一个命令（`读取文本` 是主要名字）。
     ///
-    /// 类型可写 `--类型 JSON`、`--类型=JSON`、`--JSON`，默认按扩展名推断；
-    /// 类型名不区分大小写。解析出错时返回 1，`$返回值对象` 置空。
-    fn 执行读取文本(参数: &[String], 上下文: &mut 上下文) -> 整数 {
+    /// - 不给 `--类型`：原样打印全文；给文件读文件，不给就读管道标准输入；
+    /// - 给出 `--类型`：按该类型解析，再打印对应的 JSON 文本。
+    fn 执行读取文件(参数: &[String], 上下文: &mut 上下文) -> 整数 {
+        let (文件, 类型) = match 解析读取参数(参数, "读取文件") {
+            Ok(结果) => 结果,
+            Err(状态) => return 状态,
+        };
+        let 原文 = match 文件.as_deref() {
+            Some(路径) => match std::fs::read_to_string(路径) {
+                Ok(文本) => 文本,
+                Err(错误) => {
+                    let _ = writeln!(io::stderr(), "读取文件: {路径}: {错误}");
+                    return 1;
+                }
+            },
+            None if 上下文.标准输入是管道 => {
+                let mut 文本 = String::new();
+                if let Err(错误) = io::Read::read_to_string(&mut io::stdin().lock(), &mut 文本) {
+                    let _ = writeln!(io::stderr(), "读取文件: 标准输入: {错误}");
+                    return 1;
+                }
+                文本
+            }
+            None => {
+                let _ = writeln!(io::stderr(), "读取文件: 缺少文件路径（标准输入不是管道）");
+                return 1;
+            }
+        };
+        match 类型 {
+            None => {
+                直接输出(&[原文]);
+                0
+            }
+            Some(类型名) => match 运行值::解析文本(&原文, &类型名) {
+                Ok(解析结果) => {
+                    *上下文.返回值对象 = 解析结果.转文本();
+                    输出文本(&[解析结果.写JSON()]);
+                    0
+                }
+                Err(消息) => {
+                    let _ = writeln!(io::stderr(), "读取文件: （{类型名}）: {消息}");
+                    1
+                }
+            },
+        }
+    }
+
+    /// `覆写文件 文件 内容... [--类型 类型]`：整份覆写文件，覆盖原有内容。
+    ///
+    /// - 内容按空格拼接；给了 `--类型` 时按该类型写出（JSON / INI / 文本）；
+    /// - 不给 `--类型` 时按扩展名：`.json`、`.ini`、`.conf` 分别按对应格式写，其余原样写文本；
+    /// - 内容可以写 `$返回值对象` 这类表达式文本，给了 `--类型` 时会被解析再按格式输出。
+    fn 执行覆写文件(参数: &[String], _上下文: &mut 上下文) -> 整数 {
         if 参数.is_empty() {
-            let _ = writeln!(io::stderr(), "读取文本: 缺少文件路径");
+            let _ = writeln!(io::stderr(), "覆写文件: 缺少文件路径");
             return 1;
         }
         let 文件 = 参数[0].as_str();
-        // `--类型 X`、`--类型=X`、`--X` 三种写法；`--类型` 后面跟着的是类型名本身
-        let mut 指定类型: Option<String> = None;
-        let mut 序 = 1;
-        while 序 < 参数.len() {
-            let 项 = 参数[序].as_str();
-            序 += 1;
-            if let Some(类型) = 项.strip_prefix("--类型=") {
-                指定类型 = Some(类型.to_string());
-            } else if 项 == "--类型" {
-                match 参数.get(序) {
-                    Some(类型) => {
-                        指定类型 = Some(类型.clone());
-                        序 += 1;
-                    }
-                    None => {
-                        let _ = writeln!(io::stderr(), "读取文本: --类型 后面缺少类型名");
-                        return 1;
-                    }
-                }
-            } else if let Some(类型) = 项.strip_prefix("--") {
-                指定类型 = Some(类型.to_string());
-            }
-        }
-        let 类型 = 指定类型.unwrap_or_else(|| 按扩展名推断类型(文件));
-        let 结果 = std::fs::read_to_string(文件)
-            .map_err(|错误| format!("{错误}"))
-            .and_then(|文本| 运行值::解析文本(&文本, &类型));
-        上下文.返回值对象.clear();
-        match 结果 {
-            Ok(解析结果) => {
-                *上下文.返回值对象 = 解析结果.转文本();
-                0
-            }
+        let (指定类型, 内容) = 拆分类型参数(&参数[1..], "覆写文件");
+        let 类型 = 指定类型.unwrap_or_else(|| 按扩展名推断写出类型(文件));
+        let 文本 = 内容.join(" ");
+        let 写出 = 运行值::按类型写出(&文本, &类型);
+        match 写出.and_then(|内容| {
+            std::fs::write(文件, 内容).map_err(|错误| 错误.to_string())
+        }) {
+            Ok(()) => 0,
             Err(消息) => {
-                let _ = writeln!(io::stderr(), "读取文本: {文件}（{类型}）: {消息}");
+                let _ = writeln!(io::stderr(), "覆写文件: {文件}（{类型}）: {消息}");
                 1
             }
         }
@@ -312,6 +343,71 @@ impl 内置命令 {
     }
 }
 
+/// 解析 `读取文本` 的参数：`[文件] [--类型 类型]`。
+/// 返回 `(文件, 类型)`；不给文件时文件为 None（只有 `读取文件` 接受），类型为 None 表示按扩展名推断。
+#[allow(clippy::type_complexity)]
+fn 解析读取参数(参数: &[String], 命令名: &str) -> Result<(Option<String>, Option<String>), 整数> {
+    // 第一项不以 `--` 开头就是文件；以 `--` 开头时，只有「后面还带类型选项、且本项不是已知类型名」
+    // 才当作文件名（`--配置文件` 这种写法）。
+    let 带类型 = 参数.iter().any(|项| 项.starts_with("--"));
+    let 文件 = 参数
+        .first()
+        .filter(|项| {
+            if !项.starts_with("--") {
+                return true;
+            }
+            // 以 `--` 开头：`--JSON` 这类已知类型不是文件；其余按文件名处理
+            带类型 && !是已知类型(项)
+        })
+        .cloned();
+    // 不给文件时由调用方决定是否读标准输入
+    let (指定类型, 多余) = 拆分类型参数(&参数[文件.as_ref().map_or(0, |_| 1)..], 命令名);
+    if !多余.is_empty() {
+        let _ = writeln!(io::stderr(), "{命令名}: 多余的内容：{}", 多余.join(" "));
+        return Err(1);
+    }
+    let 类型 = match 指定类型 {
+        Some(类型) => Some(类型),
+        None => 文件.as_deref().map(按扩展名推断类型),
+    };
+    Ok((文件, 类型))
+}
+
+/// 已知类型名才算选项（`--JSON` 是类型，`--配置` 当作文件名）。
+fn 是已知类型(项: &str) -> bool {
+    let 类型 = 项.trim_start_matches('-').to_ascii_uppercase();
+    matches!(类型.as_str(), "JSON" | "INI" | "TEXT" | "文本")
+}
+
+/// 从参数里拆出类型选项：`--类型 X`、`--类型=X`、`--X`；返回（类型, 其余参数）。
+fn 拆分类型参数(参数: &[String], 命令名: &str) -> (Option<String>, Vec<String>) {
+    let mut 指定类型: Option<String> = None;
+    let mut 其余 = Vec::new();
+    let mut 序 = 0;
+    while 序 < 参数.len() {
+        let 项 = 参数[序].as_str();
+        序 += 1;
+        if let Some(类型) = 项.strip_prefix("--类型=") {
+            指定类型 = Some(类型.to_string());
+        } else if 项 == "--类型" {
+            match 参数.get(序) {
+                Some(类型) => {
+                    指定类型 = Some(类型.clone());
+                    序 += 1;
+                }
+                None => {
+                    let _ = writeln!(io::stderr(), "{命令名}: --类型 后面缺少类型名");
+                }
+            }
+        } else if let Some(类型) = 项.strip_prefix("--") {
+            指定类型 = Some(类型.to_string());
+        } else {
+            其余.push(参数[序 - 1].clone());
+        }
+    }
+    (指定类型, 其余)
+}
+
 /// 没有 `--类型` 时按扩展名推断：`.ini` → INI，其余（含 `.json`）→ JSON。
 fn 按扩展名推断类型(文件: &str) -> String {
     match std::path::Path::new(文件).extension().and_then(|扩展| 扩展.to_str()) {
@@ -319,6 +415,17 @@ fn 按扩展名推断类型(文件: &str) -> String {
             "INI".to_string()
         }
         _ => "JSON".to_string(),
+    }
+}
+
+/// 写出时的默认类型：`.json` → JSON，`.ini`/`.conf` → INI，其余 → 文本。
+fn 按扩展名推断写出类型(文件: &str) -> String {
+    match std::path::Path::new(文件).extension().and_then(|扩展| 扩展.to_str()) {
+        Some(扩展) if 扩展.eq_ignore_ascii_case("json") => "JSON".to_string(),
+        Some(扩展) if 扩展.eq_ignore_ascii_case("ini") || 扩展.eq_ignore_ascii_case("conf") => {
+            "INI".to_string()
+        }
+        _ => "文本".to_string(),
     }
 }
 
@@ -511,9 +618,13 @@ pub fn 帮助() {
   输出 文本...        直接输出，不追加回车
   回显 文本...        输出并回车（-n 不回车，-e 解释 \n \t 等转义）
   运行 程序 [参数]   用程序替换当前进程；无参数时什么都不做
-  读取文本 文件 [--类型 类型]  按类型解析文件，结果放进 $返回值对象
-                     类型：JSON / INI / 文本（默认按扩展名：.ini/.conf 用 INI，其余 JSON）
-                     例：读取文本 配置.json --类型 JSON；读取文本 配置.ini
+  读取文本 [文件] [--类型 类型]  读取文件内容
+                     不给 --类型：原样打印全文（给文件则读文件，否则读管道标准输入）
+                     给 --类型：按 JSON / INI / 文本 解析，打印 JSON 文本，结果放进 $返回值对象
+                     默认类型按扩展名：.ini/.conf 用 INI，其余 JSON
+  覆写文件 文件 内容... [--类型 类型]  整份覆写文件
+                     不给 --类型：按扩展名写（.json 写 JSON、.ini/.conf 写 INI，其余原样文本）
+                     内容可写 $返回值对象；类型不认识或解析失败时不写文件
   正常 / 错误         退出码 0 / 1
   退出 [码]           退出 shell
 
@@ -540,38 +651,62 @@ mod 测试 {
             目录栈,
             执行脚本文件: 脚本,
             返回值对象: 返回值,
+            标准输入是管道: false,
         }
     }
 
     #[test]
-    fn 读取文本按类型解析() {
+    fn 读取文件与覆写文件() {
+        let 根 = std::env::temp_dir().join("壳读写文件测试");
+        let _ = std::fs::create_dir_all(&根);
+        let 源 = 根.join("源.json");
+        let 出 = 根.join("出.ini");
+        std::fs::write(&源, r#"{"名称":"壳","端口":8080}"#).unwrap();
         let mut 环境: Vec<(String, String)> = Vec::new();
         let mut 目录栈: Vec<std::path::PathBuf> = Vec::new();
         let mut 脚本 = |_: &str| 0;
-        let 文件 = std::env::temp_dir().join("壳读取文本测试.ini");
-        std::fs::write(&文件, "[段]\n键 = 值 \n数=3\n").unwrap();
-        let 路径 = 文件.display().to_string();
+
         {
+            let 参数 = vec![源.display().to_string()];
             let mut 上下文 = 新上下文(&mut 环境, &mut 目录栈, &mut 脚本);
-            assert_eq!(内置命令::读取文本.运行(std::slice::from_ref(&路径), &mut 上下文), 0);
-            assert_eq!(*上下文.返回值对象, "{段={键=值 数=3}}");
+            assert_eq!(内置命令::读取文件.运行(&参数, &mut 上下文), 0);
+            assert_eq!(*上下文.返回值对象, "{名称=壳 端口=8080}");
         }
         {
-            let 参数 = vec![路径.clone(), "--类型".into(), "文本".into()];
+            let 参数 = vec![出.display().to_string(), "{名称=壳 端口=8080}".into()];
             let mut 上下文 = 新上下文(&mut 环境, &mut 目录栈, &mut 脚本);
-            assert_eq!(内置命令::读取文本.运行(&参数, &mut 上下文), 0);
-            assert_eq!(*上下文.返回值对象, std::fs::read_to_string(&路径).unwrap());
+            assert_eq!(内置命令::覆写文件.运行(&参数, &mut 上下文), 0);
+            let 写回 = std::fs::read_to_string(&出).unwrap();
+            assert!(写回.contains("[全局]"));
+            assert!(写回.contains("名称=壳"));
         }
         {
-            let 参数 = vec![路径.clone(), "--类型".into(), "不存在的类型".into()];
+            let 原文 = std::fs::read_to_string(&源).unwrap();
+            let 参数 = vec![源.display().to_string(), "--类型".into(), "文本".into()];
             let mut 上下文 = 新上下文(&mut 环境, &mut 目录栈, &mut 脚本);
-            assert_eq!(内置命令::读取文本.运行(&参数, &mut 上下文), 1);
+            assert_eq!(内置命令::读取文件.运行(&参数, &mut 上下文), 0);
+            assert_eq!(*上下文.返回值对象, 原文);
+        }
+        {
+            let 参数 = vec![源.display().to_string(), "--类型".into(), "不认识".into()];
+            let mut 上下文 = 新上下文(&mut 环境, &mut 目录栈, &mut 脚本);
+            assert_eq!(内置命令::读取文件.运行(&参数, &mut 上下文), 1);
             assert!(上下文.返回值对象.is_empty());
         }
-        // 参数缺失
-        let mut 上下文 = 新上下文(&mut 环境, &mut 目录栈, &mut 脚本);
-        assert_eq!(内置命令::读取文本.运行(&[], &mut 上下文), 1);
-        let _ = std::fs::remove_file(&文件);
+        {
+            // 类型不认识：不写文件
+            let 坏 = 根.join("坏.ini");
+            let 参数 = vec![坏.display().to_string(), "--类型".into(), "XML".into()];
+            let mut 上下文 = 新上下文(&mut 环境, &mut 目录栈, &mut 脚本);
+            assert_eq!(内置命令::覆写文件.运行(&参数, &mut 上下文), 1);
+            assert!(!坏.exists());
+        }
+        {
+            // 不接管道时无文件应报错
+            let mut 上下文 = 新上下文(&mut 环境, &mut 目录栈, &mut 脚本);
+            assert_eq!(内置命令::读取文件.运行(&[], &mut 上下文), 1);
+        }
+        let _ = std::fs::remove_dir_all(&根);
     }
 
     #[test]
