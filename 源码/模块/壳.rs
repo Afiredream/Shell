@@ -370,12 +370,11 @@ impl 壳 {
             if matches!(
                 内置命令,
                 内置::内置命令::输出文本
+                    | 内置::内置命令::输出
                     | 内置::内置命令::替换运行
-                    | 内置::内置命令::JSON转值
                     | 内置::内置命令::显示帮助
                     | 内置::内置命令::真
                     | 内置::内置命令::假
-                    | 内置::内置命令::打印目录
             ) {
                 let mut 空环境: Vec<(String, String)> = Vec::new();
                 let mut 空栈: Vec<std::path::PathBuf> = Vec::new();
@@ -549,10 +548,11 @@ impl 壳 {
 
 /// `$(命令)` 的执行器：交给 `/bin/sh` 运行，取标准输出并去掉结尾换行。
 /// 用系统 shell 是为了支持命令里的管道/重定向；它不认识本 shell 的中文内置命令。
-fn 执行命令替换(命令: &str) -> String {
+fn 执行命令替换(命令: &str, 查变量: &dyn Fn(&str) -> Option<String>) -> String {
+    let 展开后 = 展开命令文本(命令, 查变量);
     match std::process::Command::new("/bin/sh")
         .arg("-c")
-        .arg(命令)
+        .arg(展开后)
         .output()
     {
         Ok(输出) => String::from_utf8_lossy(&输出.stdout)
@@ -560,6 +560,66 @@ fn 执行命令替换(命令: &str) -> String {
             .to_string(),
         Err(_) => String::new(),
     }
+}
+
+/// 交给 `/bin/sh` 前，先用本 shell 的变量表展开 `$(...)` 里的 `$变量`/`${变量}`：
+/// sh 不认中文变量名。单引号内的内容原样保留（留给内层程序，如 `awk '{print $1}'`），
+/// 变量不存在时也原样保留交给 sh。
+fn 展开命令文本(文本: &str, 查变量: &dyn Fn(&str) -> Option<String>) -> String {
+    let 字符: Vec<char> = 文本.chars().collect();
+    let mut 结果 = String::with_capacity(文本.len());
+    let mut i = 0;
+    let mut 单引号 = false;
+    while i < 字符.len() {
+        let c = 字符[i];
+        if c == '\'' {
+            单引号 = !单引号;
+            结果.push(c);
+            i += 1;
+            continue;
+        }
+        if !单引号 && c == '$' {
+            match 字符.get(i + 1) {
+                Some('{') => {
+                    if let Some(偏移) = 字符[i + 2..].iter().position(|&x| x == '}') {
+                        let 名: String = 字符[i + 2..i + 2 + 偏移].iter().collect();
+                        match 查变量(&名) {
+                            Some(值) => 结果.push_str(&值),
+                            None => {
+                                for 字 in &字符[i..i + 3 + 偏移] {
+                                    结果.push(*字);
+                                }
+                            }
+                        }
+                        i = i + 3 + 偏移;
+                        continue;
+                    }
+                }
+                Some(&首) if 首.is_alphanumeric() || 首 == '_' => {
+                    let 起点 = i + 1;
+                    let mut 终点 = 起点;
+                    while 终点 < 字符.len() && (字符[终点].is_alphanumeric() || 字符[终点] == '_') {
+                        终点 += 1;
+                    }
+                    let 名: String = 字符[起点..终点].iter().collect();
+                    match 查变量(&名) {
+                        Some(值) => 结果.push_str(&值),
+                        None => {
+                            for 字 in &字符[i..终点] {
+                                结果.push(*字);
+                            }
+                        }
+                    }
+                    i = 终点;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        结果.push(c);
+        i += 1;
+    }
+    结果
 }
 
 /// 提示符里的目录：家目录显示成 `~`。
@@ -604,7 +664,7 @@ mod 测试 {
 
         // 如果 / 或者 / 否则：只有命中的分支改变量
         let 状态 = 实例.运行脚本文本(
-            "分支=无\n如果 假\n    分支=一\n或者 真\n    分支=二\n否则\n    分支=三",
+            "分支=无\n如果 错误\n    分支=一\n或者 正常\n    分支=二\n否则\n    分支=三",
         );
         assert_eq!(状态, 0);
         assert_eq!(实例.变量.get("分支").map(String::as_str), Some("二"));
@@ -614,7 +674,7 @@ mod 测试 {
         assert_eq!(状态, 0);
         assert_eq!(实例.变量.get("结果").map(String::as_str), Some("甲乙丙"));
 
-        // 每当：条件为假后停止
+        // 每当：条件错误后停止
         let 状态 = 实例.运行脚本文本("次数=\n每当 test \"$次数\" != \"aa\"\n    次数=a$次数");
         assert_eq!(状态, 0);
         assert_eq!(实例.变量.get("次数").map(String::as_str), Some("aa"));
@@ -655,6 +715,15 @@ mod 测试 {
         assert_eq!(状态, 0);
         assert_eq!(实例.变量.get("函果甲").map(String::as_str), Some("内传传"));
         assert_eq!(实例.变量.get("函果乙").map(String::as_str), Some("外外全局"));
+    }
+
+    #[test]
+    fn 命令替换展开变量() {
+        // $(...) 里先用本 shell 的变量表展开，再交给 /bin/sh（sh 不认中文变量名）
+        let mut 实例 = 壳::新建();
+        let 状态 = 实例.运行脚本文本("甲=你好; 结果=\"$(echo ${甲})\"");
+        assert_eq!(状态, 0);
+        assert_eq!(实例.变量.get("结果").map(String::as_str), Some("你好"));
     }
 
     #[test]

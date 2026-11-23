@@ -26,7 +26,8 @@ pub struct 释义器<'a> {
     /// 上一条命令的退出状态，供 `$?` 使用
     pub 最后状态: 整数,
     /// `$(命令)` 的执行器：返回命令的标准输出
-    pub 命令替换: &'a dyn Fn(&str) -> String,
+    #[allow(clippy::type_complexity)]
+    pub 命令替换: &'a dyn Fn(&str, &dyn Fn(&str) -> Option<String>) -> String,
 }
 
 impl<'a> 释义器<'a> {

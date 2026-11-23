@@ -42,12 +42,6 @@ impl 值 {
         serde_json::to_string(self).unwrap_or_default()
     }
 
-    /// 从 JSON 还原为值。
-    #[allow(non_snake_case)]
-    pub fn 从JSON(文本: &str) -> Option<Self> {
-        serde_json::from_str(文本).ok()
-    }
-
     /// 转成退出码：整数取自身；文本若是数字也按数字取，其余视为成功（0）。
     pub fn 转退出码(&self) -> i64 {
         match self {
@@ -297,13 +291,6 @@ mod 测试 {
             值,
             值::数组(vec![值::文本("1".into()), 值::文本("你好".into())])
         );
-    }
-
-    #[test]
-    fn json往返() {
-        let 值 = 求值文本("{甲=1 列表=(2 三)}");
-        let json = 值.转JSON();
-        assert_eq!(值::从JSON(&json), Some(值));
     }
 
     #[test]
