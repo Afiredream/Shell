@@ -12,7 +12,7 @@
 ```sh
 cargo build --release
 ./构建/release/壳 脚本.壳            # 运行脚本文件
-./构建/release/壳 -c 'ls | wc -l'    # 执行一条命令
+./构建/release/壳 'ls | wc -l'       # 运行一段命令文本
 ```
 
 ## 项目速览

@@ -3087,7 +3087,6 @@ enum Builtin {
     Echo,
     Print,
     Exec,
-    HelpCmd,
     True,
     False,
     Export,
@@ -3106,7 +3105,6 @@ const ALL: &[(&str, Builtin)] = &[
     ("回显", Builtin::Echo),
     ("输出", Builtin::Print),
     ("运行", Builtin::Exec),
-    ("帮助", Builtin::HelpCmd),
     ("正常", Builtin::True),
     ("错误", Builtin::False),
     ("读取文本", Builtin::ReadFile),
@@ -3152,10 +3150,6 @@ impl Builtin {
             Self::Exec => exec_replace(args),
             Self::ReadFile => Self::run_read_file(args, ctx),
             Self::WriteFile => Self::run_write_file(args, ctx),
-            Self::HelpCmd => {
-                help();
-                0
-            }
             Self::True => 0,
             Self::False => 1,
         }
@@ -3584,67 +3578,6 @@ fn interpret_escapes(orig_text: &str) -> String {
     result
 }
 
-fn help() {
-    println!(
-        r##"壳 —— 一个几百行的极简 shell（壳语言）
-
-用法： 壳 脚本 [参数] 运行脚本文件，参数用 $1、$2…… 取到（$0 是脚本名）
-       壳 -c "命令"  执行一段命令后退出（可用换行写控制流）
-       壳 -h / --help 显示本帮助
-
-语法：
-  控制流    如果 条件                              条件退出码 0 为真
-            或者 条件 / 否则                        与「如果」同缩进
-            对于 变量 词...                         逐个取值赋予变量
-            每当 条件                               条件为真时循环
-            跳出 / 继续                             退出循环 / 进入下一轮
-  函数      函数 名称 参数...                      定义函数（参数用 $参数名 或 $1 取到）
-            返回 [表达式]                           从函数返回；整数/文本/数组/对象均可
-            数组 (a b)  对象 {{键=值 ...}}          可嵌套；$返回值 取回文本形式
-            块体用缩进表示：块头下缩进，回退即结束
-  管道      cmd1 | cmd2          把前一个命令的标准输出接到后一个
-            cmd1 2>&1 | cmd2     标准错误也一起进入管道（同 |&）
-  重定向    cmd > 文件  >> 文件   覆写 / 追加标准输出
-            cmd 2> 文件          重定向标准错误
-            cmd < 文件           标准输入来自文件
-            cmd &> 文件          标准输出与标准错误一起重定向
-  后台      异步 cmd 参数     放到后台执行（旧写法 cmd & 仍可用）
-  分隔      cmd1 ; cmd2          依次执行（换行同理）
-  引号      单引号内原样；双引号内仅 $ 与 \ 可转义
-  变量      $名称 ${{名称}} $0 $1…  $? $# $@ $* $$ $!
-            默认参数变量：$参数（第一个）$参数列表 $参数个数 $参数对象（解析后的 JSON）
-            全局变量：$当前目录；脚本内：$脚本路径 $脚本目录
-  展开      $(命令)（命令替换，由本 shell 执行，取标准输出；(…) / {{…}} 按数组/对象处理）
-            ~/路径、* ? [abc]、# 注释
-  省略号    <文字> 去掉尖括号（回显 <x=$x>）；文字以 . 开头时第一个词按实词
-            「导入」要用「.导入 文件」，才能和管道等符号写在一起
-
-内置命令：
-  进入 [目录]        切换目录（不带参数回家，进入 - 回上一次）
-  压栈 [目录]        把目录压入目录栈并进入；不带参数时在当前目录与栈顶之间切换
-  弹栈               回到目录栈顶的目录，并把它弹出
-  导出               列出当前 shell 的全部环境变量
-  导出 名=数据        设置并导出环境变量；名= 留空则删除该变量
-  删除 名...          删除环境变量
-  导入 文件...        在当前 shell 里逐行执行脚本（变量、目录变化都保留）
-  输出 文本...        直接输出，不追加回车
-  回显 文本...        输出并回车（-n 不回车，-e 解释 \n \t 等转义）
-  运行 程序 [参数]   用程序替换当前进程；无参数时什么都不做
-  读取文本 [文件] [--类型 类型]  读取文件内容
-                     不给 --类型：原样打印全文（给文件则读文件，否则读管道标准输入）
-                     给 --类型：按 JSON / INI / 文本 解析，打印值文本 ((…) / {{键=值}})，
-                     结果也放进 $返回值对象
-                     默认类型按扩展名：.ini/.conf 用 INI，其余 JSON
-  覆写文件 文件 内容... [--类型 类型]  整份覆写文件
-                     不给 --类型：按扩展名写（.json 写 JSON、.ini/.conf 写 INI，其余原样文本）
-                     内容可写 $返回值对象；类型不认识或解析失败时不写文件
-  正常 / 错误         退出码 0 / 1
-  退出 [码]           立即结束脚本，返回该状态码
-
-启动文件： ~/.壳语言rc 会在启动时逐行执行。
-退出码：  脚本最后一条命令的状态；语法错误为 2。"##
-    );
-}
 
 #[cfg(test)]
 mod builtin_tests {
@@ -4478,59 +4411,21 @@ fn empty_cmdsub(_cmd: &str, _lookup: &dyn Fn(&str) -> Option<String>) -> String 
     String::new()
 }
 
-use clap::Parser;
-
-#[derive(Parser)]
-#[command(
-    name = "壳",
-    version,
-    about = "壳语言：中文命名的 shell",
-    disable_help_flag = true
-)]
-struct Cli {
-    #[arg(short = 'c', value_name = "命令", conflicts_with = "script")]
-    command: Option<String>,
-
-    #[arg(short = 'h', long = "help", action = clap::ArgAction::SetTrue)]
-    show_help: bool,
-
-    #[arg(value_name = "脚本")]
-    script: Option<String>,
-
-    #[arg(value_name = "参数", trailing_var_arg = true, requires = "script")]
-    script_args: Vec<String>,
-}
-
 fn main() {
-    let args = Cli::parse();
-    let mut shell = Shell::new();
-
-    if args.show_help {
-        help();
-        return;
-    }
-
-    if let Some(command_text) = args.command {
-        shell.load_rc();
-        let status = shell.run_text(&command_text);
-        std::process::exit(if shell.quit {
-            shell.exit_code
-        } else {
-            status
-        });
-    }
-
-    let Some(script_file) = args.script else {
-        help();
+    let mut argv = std::env::args_os().skip(1);
+    let Some(first) = argv.next() else {
         std::process::exit(2);
     };
-
+    let args: Vec<String> = argv.map(|arg| arg.to_string_lossy().into_owned()).collect();
+    let first = first.to_string_lossy().into_owned();
+    let mut shell = Shell::new();
     shell.load_rc();
-    shell.set_positional(&script_file, &args.script_args);
-    let status = shell.run_script_file(&script_file);
-    std::process::exit(if shell.quit {
-        shell.exit_code
+    let status = if std::path::Path::new(&first).is_file() {
+        shell.set_positional(&first, &args);
+        shell.run_script_file(&first)
     } else {
-        status
-    });
+        shell.set_positional("壳", &args);
+        shell.run_text(&first)
+    };
+    std::process::exit(if shell.quit { shell.exit_code } else { status });
 }

@@ -11,7 +11,6 @@ path = "源码/主体.rs"
 
 # 依赖均为 MIT / Apache-2.0 许可，与 AGPL-3.0-or-later 兼容。
 [dependencies]
-clap = { version = "4", features = ["derive"] }   # 命令行参数解析
 dirs = "7"                                        # 跨平台家目录
 glob = "0.3"                                      # shell 风格通配匹配（替代手写）
 libc = "0.2"                                      # C 库绑定（替代手写 extern）
