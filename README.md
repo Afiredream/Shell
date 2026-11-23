@@ -7,11 +7,11 @@
 ```text
 $ cargo run
 壳语言 壳 v0.1.0 —— 输入 help 查看用法，Ctrl-D 退出。
-user@host:~$ echo 你好 | tr -d '\n'; echo 世界
+user@host:~$ 输出文本 你好 | tr -d '\n'; 输出文本 世界
 你好世界
 user@host:~$ ls /不存在的 2>&1 | wc -l
 1
-user@host:~$ 异步运行 echo 追加 >> 笔记.txt
+user@host:~$ 异步运行 输出文本 追加 >> 笔记.txt
 [4242] 已放入后台
 ```
 
@@ -24,6 +24,8 @@ user@host:~$ 异步运行 echo 追加 >> 笔记.txt
 | 管道 | `a \| b \| c`、`a \|& b`（stderr 也进管道）、`a 2>&1 \| b` |
 | 重定向 | `>` `>>` `<`、`2>` `2>>`、`2>&1`、`&>` `&>>`（stdout+stderr 一起） |
 | 后台 | `异步运行 cmd 参数`（旧写法 `cmd &` 仍可用；自成进程组，退出 shell 后不会被挂起） |
+| 控制流 | `如果/或者/否则/结束`、`对于 变量 在 ... /结束`、`每当 ... /结束`、`跳出`、`继续`（可嵌套） |
+| 函数 | `函数 名称 参数... /结束` 定义，`返回 [码]` 返回；参数用 `$参数名` 或 `$1` 取到 |
 | 分隔 | `;`、换行、行尾 `\` 续行 |
 | 引号 | `'...'` 原样；`"..."` 里 `$变量` 照常展开、空白不切分；`\` 转义 |
 | 展开 | `$变量`、`${变量}`、`$?`、`~`、`~/路径`、`*`、`?`、`[abc]`、`[!abc]` |
@@ -32,7 +34,7 @@ user@host:~$ 异步运行 echo 追加 >> 笔记.txt
 | 启动文件 | `~/.壳语言rc` 逐行执行 |
 
 内置命令：`进入目录`（支持 `进入目录 -`）、`压栈目录`、`弹栈目录`、`打印目录`、`环境变量`、`unset`、
-`加载脚本`、`echo [-n] [-e]`、`help`、`true`、`false`、`退出进程 [码]`；`cd`/`pushd`/`popd`/`pwd`/`export`/`env`/`source`/`exit` 作为旧名保留。
+`加载脚本`、`输出文本 [-n] [-e]`、`替换运行 程序 [参数]`、`help`、`true`、`false`、`退出进程 [码]`；`cd`/`pushd`/`popd`/`pwd`/`export`/`env`/`source`/`exit`/`echo`/`exec` 作为旧名保留。
 
 直接运行脚本：`壳 脚本文件 参数...` 逐行执行文件，参数可用 `$1`、`$2`…… 取到（`$0` 是脚本名）。
 
@@ -101,7 +103,7 @@ user@host:~$ 异步运行 echo 追加 >> 笔记.txt
 
 ```sh
 cargo build --release          # 产物：构建/release/壳
-cargo test                     # 词法、展开、引号的单元测试（23 项）
+cargo test                     # 词法、展开、引号、控制流、函数的单元测试（27 项）
 cargo clippy                   # 静态检查（0 警告）
 cargo run                      # 交互模式（提示符需要真实终端）
 cargo run -- -c 'ls | wc -l'   # 执行一条命令
@@ -124,23 +126,23 @@ make 安装 安装目录=/别的/目录   # 换安装位置
 user@host:~/demo$ printf '苹果\n香蕉\n苹果\n' | sort | uniq -c
       2 苹果
       1 香蕉
-user@host:~/demo$ ls /nope 2> 错误.txt; echo 状态=$?
+user@host:~/demo$ ls /nope 2> 错误.txt; 输出文本 状态=$?
 状态=2
 user@host:~/demo$ X=外层; X=内层 env | grep ^X=
 X=内层
-user@host:~/demo$ echo 外层=$X
+user@host:~/demo$ 输出文本 外层=$X
 外层=外层
-user@host:~/demo$ touch 甲.rs 乙.rs; echo *.rs
+user@host:~/demo$ touch 甲.rs 乙.rs; 输出文本 *.rs
 乙.rs 甲.rs
-user@host:~/demo$ echo "*.rs"
+user@host:~/demo$ 输出文本 "*.rs"
 *.rs
 ```
 
 ## 已知边界
 
 - 只面向 Linux（Arch/glibc 下验证）；`O_*` 常量按 Linux 取值。
-- 不做作业控制：没有 `jobs`/`fg`/`bg`，没有 `&&`、`||`、`if`、循环、函数、命令替换、
-  子 shell。
+- 不做作业控制：没有 `jobs`/`fg`/`bg`，没有 `&&`、`||`、命令替换、子 shell。
+  控制流用中文的 `如果`/`或者`/`否则`、`对于`、`每当`（配 `结束`）实现；函数用 `函数`/`返回`，都支持嵌套。
 - 后台作业退出后由 init 回收，shell 不打印完成通知（没有 SIGCHLD 处理）。
 - 交互模式没有行编辑（没有 readline），方向键/历史记录不可用。
 - 展开顺序与 bash 略有不同：`$变量` 展开出来的内容不会再被当作通配符解析；
@@ -196,7 +198,7 @@ curl -fLO "$base/shell-0.1.0-linux-x86_64"
 curl -fsLO "$base/shell-0.1.0-linux-x86_64.sha256"
 sha256sum -c shell-0.1.0-linux-x86_64.sha256
 sudo install -m 755 shell-0.1.0-linux-x86_64 /usr/local/bin/壳
-壳 -c 'echo 你好 | tr a-z A-Z'
+壳 -c '输出文本 你好 | tr a-z A-Z'
 ```
 
 本地源码构建则不用下载：`make 安装` 会把「壳」装到 `~/bin/壳`。

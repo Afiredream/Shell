@@ -10,8 +10,23 @@ use std::collections::HashMap;
 use super::内置;
 use super::执行::{self, 管道片段, 重定向守护};
 use super::系统::整数;
-use super::词法;
+use super::词法::{self, 块错误, 语句};
 use super::释义::{释义, 释义器};
+
+/// 控制流信号。用返回值传递，避免「忘记清除」的状态残留。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum 流 {
+    正常(整数),
+    跳出(整数),
+    继续(整数),
+    返回(整数),
+}
+
+/// 交互模式一行输入的反馈。
+pub enum 运行反馈 {
+    完成(整数),
+    继续,
+}
 
 pub struct 壳 {
     pub 变量: HashMap<String, String>,
@@ -21,6 +36,10 @@ pub struct 壳 {
     pub 退出: bool,
     /// 退出时使用的状态码
     pub 退出码: 整数,
+    /// 交互模式下未完成的块缓冲
+    pub 块缓冲: Vec<String>,
+    /// 函数表：名称 → (参数名列表, 函数体)
+    pub 函数表: HashMap<String, (Vec<String>, Vec<语句>)>,
 }
 
 impl 壳 {
@@ -37,6 +56,8 @@ impl 壳 {
             最后状态: 0,
             退出: false,
             退出码: 0,
+            块缓冲: Vec::new(),
+            函数表: HashMap::new(),
         }
     }
 
@@ -68,15 +89,21 @@ impl 壳 {
                 return 1;
             }
         };
-        for 每行 in 内容.lines() {
-            if self.退出 {
-                break;
+        let 语句列表 = match 词法::解析脚本(&内容) {
+            Ok(列表) => 列表,
+            Err(错误) => {
+                eprintln!("语法错误：{错误}");
+                return 2;
             }
-            self.运行一行(每行);
-        }
+        };
+        let 结果 = self.执行语句列表(&语句列表);
         // 脚本里改过的变量（内置命令已同步写进进程环境）并回 shell 的变量表
         self.变量.extend(std::env::vars());
-        self.最后状态
+        match 结果 {
+            流::正常(码) => 码,
+            // 解析阶段已拦截循环外的跳出/继续；到顶层的按当前状态处理
+            流::跳出(码) | 流::继续(码) | 流::返回(码) => 码,
+        }
     }
 
     /// 给脚本设置位置参数：脚本路径是 `$0`，后面的参数依次是 `$1`、`$2`……
@@ -113,17 +140,9 @@ impl 壳 {
         format!("{用户}@{主机}:{}{符号} ", 短目录())
     }
 
-    /// 执行一整行。返回最后一条作业的状态。
-    pub fn 运行一行(&mut self, 输入行: &str) -> 整数 {
-        let 作业列表 = match 词法::解析命令(输入行) {
-            Ok(列表) => 列表,
-            Err(语法错误) => {
-                eprintln!("语法错误：{语法错误}");
-                self.最后状态 = 2;
-                return 2;
-            }
-        };
-        for 待执行作业 in &作业列表 {
+    /// 执行一组作业。
+    fn 执行作业列表(&mut self, 作业列表: &[词法::作业]) -> 整数 {
+        for 待执行作业 in 作业列表 {
             if self.退出 {
                 break;
             }
@@ -155,7 +174,152 @@ impl 壳 {
         self.最后状态
     }
 
+    /// 执行语句序列；跳出/继续向上传播，由最近的循环消费。
+    pub fn 执行语句列表(&mut self, 语句们: &[语句]) -> 流 {
+        let mut 状态 = 0;
+        for 语句 in 语句们 {
+            if self.退出 {
+                return 流::正常(self.退出码);
+            }
+            match self.执行语句(语句) {
+                流::正常(码) => 状态 = 码,
+                其它 => return 其它,
+            }
+        }
+        // 块内命令改过的变量同步回变量表
+        self.变量.extend(std::env::vars());
+        流::正常(状态)
+    }
+
+    fn 执行语句(&mut self, 语句: &语句) -> 流 {
+        match 语句 {
+            语句::作业列表(作业列表) => 流::正常(self.执行作业列表(作业列表)),
+            语句::如果 { 分支, 否则体 } => {
+                for (条件, 体) in 分支 {
+                    if self.执行作业列表(std::slice::from_ref(条件)) == 0 {
+                        return self.执行语句列表(体);
+                    }
+                }
+                if let Some(体) = 否则体 {
+                    return self.执行语句列表(体);
+                }
+                流::正常(0)
+            }
+            语句::对于 { 变量, 取值, 体 } => {
+                let mut 状态 = 0;
+                for 字 in 取值 {
+                    let 值列表 = {
+                        let 快照 = self.变量快照();
+                        let 释义器 = 释义器 {
+                            环境表: &快照,
+                            最后状态: self.最后状态,
+                        };
+                        释义器.展开(字)
+                    };
+                    for 值 in 值列表 {
+                        self.变量.insert(变量.clone(), 值.clone());
+                        std::env::set_var(变量, &值);
+                        match self.执行语句列表(体) {
+                            流::正常(码) => 状态 = 码,
+                            流::返回(码) => return 流::返回(码),
+                            流::跳出(码) => return 流::正常(码),
+                            流::继续(码) => {
+                                状态 = 码;
+                                continue;
+                            }
+                        }
+                        if self.退出 {
+                            return 流::正常(self.退出码);
+                        }
+                    }
+                }
+                流::正常(状态)
+            }
+            语句::每当 { 条件, 体 } => {
+                let mut 状态 = 0;
+                loop {
+                    if self.退出 {
+                        return 流::正常(self.退出码);
+                    }
+                    if self.执行作业列表(std::slice::from_ref(条件)) != 0 {
+                        break;
+                    }
+                    match self.执行语句列表(体) {
+                        流::正常(码) => 状态 = 码,
+                        流::返回(码) => return 流::返回(码),
+                        流::跳出(码) => {
+                            状态 = 码;
+                            break;
+                        }
+                        流::继续(码) => 状态 = 码,
+                    }
+                }
+                流::正常(状态)
+            }
+            语句::跳出 => 流::跳出(self.最后状态),
+            语句::继续 => 流::继续(self.最后状态),
+            语句::函数 { 名称, 参数, 体 } => {
+                self.函数表.insert(名称.clone(), (参数.clone(), 体.clone()));
+                流::正常(0)
+            }
+            语句::返回(码文本) => {
+                let 码 = 码文本
+                    .as_deref()
+                    .and_then(|文本| 文本.parse().ok())
+                    .unwrap_or(self.最后状态);
+                流::返回(码)
+            }
+        }
+    }
+
+    /// 交互模式：攒行直到块完整再执行；块没写完时保留缓冲。
+    pub fn 运行输入(&mut self, 行: &str) -> 运行反馈 {
+        self.块缓冲.push(行.to_string());
+        let 文本 = self.块缓冲.join("\n");
+        match 词法::解析脚本(&文本) {
+            Ok(语句列表) => {
+                self.块缓冲.clear();
+                let 状态 = match self.执行语句列表(&语句列表) {
+                    流::正常(码) => 码,
+                    流::跳出(码) | 流::继续(码) | 流::返回(码) => 码,
+                };
+                运行反馈::完成(状态)
+            }
+            Err(错误) if 错误.原因 == 块错误::未完成 => 运行反馈::继续,
+            Err(错误) => {
+                eprintln!("语法错误：{错误}");
+                self.块缓冲.clear();
+                运行反馈::完成(2)
+            }
+        }
+    }
+
+    /// 执行一段脚本文本（`-c` 用）；文本里的换行可以表达块。
+    pub fn 运行脚本文本(&mut self, 文本: &str) -> 整数 {
+        let 语句列表 = match 词法::解析脚本(文本) {
+            Ok(列表) => 列表,
+            Err(错误) => {
+                eprintln!("语法错误：{错误}");
+                return 2;
+            }
+        };
+        match self.执行语句列表(&语句列表) {
+            流::正常(码) => 码,
+            流::跳出(码) | 流::继续(码) | 流::返回(码) => 码,
+        }
+    }
+
     fn 执行管道(&mut self, 片段: 管道片段) -> 整数 {
+        // 0) 函数调用：函数优先于内置命令与外部命令
+        if 片段.命令.len() == 1 && !片段.后台 {
+            let 程序名 = 片段.命令[0].程序名();
+            let 定义 = self.函数表.get(&程序名).cloned();
+            if let Some((参数名, 体)) = 定义 {
+                let 实参 = 片段.命令[0].参数列表[1..].to_vec();
+                return self.执行函数调用(&程序名, &参数名, &实参, &体, &片段.重定向);
+            }
+        }
+
         // 1) 单独的内置命令：在 shell 自身进程里执行，输出跟着（临时）重定向走
         if let Some(内置命令) = 片段.内置命令() {
             let _守护 = if 片段.重定向.是否设置() || 片段.重定向.合并错误 {
@@ -216,6 +380,85 @@ impl 壳 {
         }
     }
 
+    /// 执行函数调用：命名参数与位置参数只在调用期间生效，返回后恢复。
+    fn 执行函数调用(
+        &mut self,
+        名称: &str,
+        参数名: &[String],
+        实参: &[String],
+        体: &[语句],
+        重定向: &执行::重定向,
+    ) -> 整数 {
+        let _守护 = if 重定向.是否设置() || 重定向.合并错误 {
+            match 重定向守护::应用(重定向) {
+                Ok(守护) => Some(守护),
+                Err(错误) => {
+                    eprintln!("壳语言：{错误}");
+                    return 1;
+                }
+            }
+        } else {
+            None
+        };
+
+        let 原位置参数 = self.位置参数快照();
+        let 原命名参数: Vec<(String, Option<String>)> = 参数名
+            .iter()
+            .map(|名字| (名字.clone(), self.变量.get(名字).cloned()))
+            .collect();
+
+        self.变量.insert("0".into(), 名称.to_string());
+        for (序号, 名字) in 参数名.iter().enumerate() {
+            let 值 = 实参.get(序号).cloned().unwrap_or_default();
+            self.变量.insert(名字.clone(), 值);
+        }
+        for (序号, 值) in 实参.iter().enumerate() {
+            self.变量.insert((序号 + 1).to_string(), 值.clone());
+        }
+
+        let 结果 = self.执行语句列表(体);
+        let 码 = match 结果 {
+            流::正常(码) | 流::返回(码) => 码,
+            // 解析阶段已拦截循环外的跳出/继续；函数体内它们也不越过函数边界
+            流::跳出(码) | 流::继续(码) => 码,
+        };
+
+        self.恢复位置参数(原位置参数);
+        for (名字, 原值) in 原命名参数 {
+            if let Some(值) = 原值 {
+                self.变量.insert(名字, 值);
+            } else {
+                self.变量.remove(&名字);
+            }
+        }
+        码
+    }
+
+    fn 位置参数快照(&self) -> Vec<(String, Option<String>)> {
+        self.变量
+            .keys()
+            .filter(|键| !键.is_empty() && 键.chars().all(|字符| 字符.is_ascii_digit()))
+            .map(|键| (键.clone(), self.变量.get(键).cloned()))
+            .collect()
+    }
+
+    fn 恢复位置参数(&mut self, 快照: Vec<(String, Option<String>)>) {
+        let 数字键: Vec<String> = self
+            .变量
+            .keys()
+            .filter(|键| !键.is_empty() && 键.chars().all(|字符| 字符.is_ascii_digit()))
+            .cloned()
+            .collect();
+        for 键 in 数字键 {
+            self.变量.remove(&键);
+        }
+        for (键, 值) in 快照 {
+            if let Some(值) = 值 {
+                self.变量.insert(键, 值);
+            }
+        }
+    }
+
     /// 内置命令执行完后合并变量。
     ///
     /// 内置命令改变量时总会同步写 `set_var` / `remove_var`，所以以**进程环境**为准；
@@ -270,5 +513,63 @@ mod 测试 {
         assert!(实例.变量.get("3").is_none());
         // 位置参数只在 shell 内部，不写进进程环境
         assert_eq!(std::env::var_os("1"), 原有一);
+    }
+
+    #[test]
+    fn 控制流执行() {
+        let mut 实例 = 壳::新建();
+
+        // 如果 / 或者 / 否则：只有命中的分支改变量
+        let 状态 = 实例.运行脚本文本(
+            "分支=无\n如果 false\n分支=一\n或者 true\n分支=二\n否则\n分支=三\n结束",
+        );
+        assert_eq!(状态, 0);
+        assert_eq!(实例.变量.get("分支").map(String::as_str), Some("二"));
+
+        // 对于：逐值赋予循环变量；块内改动块外可见
+        let 状态 = 实例.运行脚本文本("结果=\n对于 项 在 甲 乙 丙\n结果=${结果}${项}\n结束");
+        assert_eq!(状态, 0);
+        assert_eq!(实例.变量.get("结果").map(String::as_str), Some("甲乙丙"));
+
+        // 每当：条件为假后停止
+        let 状态 = 实例.运行脚本文本("次数=\n每当 test \"$次数\" != \"aa\"\n次数=a$次数\n结束");
+        assert_eq!(状态, 0);
+        assert_eq!(实例.变量.get("次数").map(String::as_str), Some("aa"));
+
+        // 继续 / 跳出
+        let 状态 = 实例.运行脚本文本(
+            "收=\n对于 项 在 甲 乙 丙\n如果 test \"$项\" = \"乙\"\n继续\n结束\n收=${收}${项}\n结束",
+        );
+        assert_eq!(状态, 0);
+        assert_eq!(实例.变量.get("收").map(String::as_str), Some("甲丙"));
+
+        let 状态 = 实例.运行脚本文本(
+            "收=\n对于 项 在 甲 乙 丙\n如果 test \"$项\" = \"乙\"\n跳出\n结束\n收=${收}${项}\n结束",
+        );
+        assert_eq!(状态, 0);
+        assert_eq!(实例.变量.get("收").map(String::as_str), Some("甲"));
+    }
+
+    #[test]
+    fn 函数执行() {
+        let mut 实例 = 壳::新建();
+
+        // 定义 + 命名参数
+        let 状态 = 实例.运行脚本文本("函数 问候 名字\n结果=你好$名字\n结束\n问候 世界");
+        assert_eq!(状态, 0);
+        assert_eq!(实例.变量.get("结果").map(String::as_str), Some("你好世界"));
+
+        // 返回码
+        let 状态 = 实例.运行脚本文本("函数 给码\n返回 7\n结束\n给码");
+        assert_eq!(状态, 7);
+
+        // 命名参数与位置参数在函数返回后恢复
+        实例.设置位置参数("脚本", &["全局".into()]);
+        let 状态 = 实例.运行脚本文本(
+            "函数 设置 甲\n结果=内$甲$1\n结束\n甲=外\n设置 传\n结果2=外$甲$1",
+        );
+        assert_eq!(状态, 0);
+        assert_eq!(实例.变量.get("结果").map(String::as_str), Some("内传传"));
+        assert_eq!(实例.变量.get("结果2").map(String::as_str), Some("外外全局"));
     }
 }

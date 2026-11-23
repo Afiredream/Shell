@@ -85,8 +85,8 @@ pub fn 分叉进程() -> 整数 {
     unsafe { c::fork() }
 }
 
-/// 用 `文件名` 与 `argv` 替换当前进程映像；只有失败才返回。
-pub fn 执行程序(文件名: *const 字符, 参数表: *const *const 字符) -> 整数 {
+/// 用 `文件名` 与 `argv` 替换当前进程映像（exec）；只有失败才返回。
+pub fn 替换运行(文件名: *const 字符, 参数表: *const *const 字符) -> 整数 {
     unsafe { c::r#execvp(文件名, 参数表) }
 }
 

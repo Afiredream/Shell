@@ -88,6 +88,91 @@ pub struct 作业 {
     pub 后台: bool,
 }
 
+/// 控制流语句。块体递归包含语句，形成语句树。
+#[derive(Debug, Clone)]
+pub enum 语句 {
+    /// 一段普通命令（由 ; 或换行分隔的作业）
+    作业列表(Vec<作业>),
+    /// `如果 <条件>` / `或者 <条件>` / `否则` … `结束`
+    如果 {
+        分支: Vec<(作业, Vec<语句>)>,
+        否则体: Option<Vec<语句>>,
+    },
+    /// `对于 <变量> 在 <词...>` … `结束`
+    对于 {
+        变量: String,
+        取值: Vec<词>,
+        体: Vec<语句>,
+    },
+    /// `每当 <条件>` … `结束`
+    每当 { 条件: 作业, 体: Vec<语句> },
+    /// 退出最近的 对于/每当
+    跳出,
+    /// 进入下一次循环
+    继续,
+    /// `函数 名称 参数...` … `结束`
+    函数 {
+        名称: String,
+        参数: Vec<String>,
+        体: Vec<语句>,
+    },
+    /// `返回 [码]`，从函数返回
+    返回(Option<String>),
+}
+
+/// 块级错误，带行号包装成 [`脚本错误`]。
+#[derive(Debug, Clone, PartialEq)]
+pub enum 块错误 {
+    底层(语法错误),
+    /// 块还没写完（交互层据此继续攒行）
+    未完成,
+    多余的结束,
+    如果缺少条件,
+    对于格式错误,
+    或者没有匹配的如果,
+    否则之后不能再有或者,
+    循环外跳出或继续,
+    条件不能后台,
+    函数缺少名称,
+    返回不在函数中,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct 脚本错误 {
+    pub 行: usize,
+    pub 原因: 块错误,
+}
+
+impl fmt::Display for 脚本错误 {
+    fn fmt(&self, 格式: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.原因 {
+            块错误::底层(错误) => write!(格式, "第 {} 行：{错误}", self.行),
+            块错误::未完成 => write!(格式, "第 {} 行：块未结束", self.行),
+            块错误::多余的结束 => write!(格式, "第 {} 行：多余的「结束」", self.行),
+            块错误::如果缺少条件 => write!(格式, "第 {} 行：「如果」缺少条件", self.行),
+            块错误::对于格式错误 => {
+                write!(格式, "第 {} 行：「对于」格式应为「对于 变量 在 词...」", self.行)
+            }
+            块错误::或者没有匹配的如果 => {
+                write!(格式, "第 {} 行：「或者」没有匹配的「如果」", self.行)
+            }
+            块错误::否则之后不能再有或者 => {
+                write!(格式, "第 {} 行：「否则」之后不能再有「或者」", self.行)
+            }
+            块错误::循环外跳出或继续 => {
+                write!(格式, "第 {} 行：「跳出」/「继续」只能用在循环中", self.行)
+            }
+            块错误::条件不能后台 => {
+                write!(格式, "第 {} 行：条件不能使用后台（异步运行 / &）", self.行)
+            }
+            块错误::函数缺少名称 => write!(格式, "第 {} 行：「函数」缺少名称", self.行),
+            块错误::返回不在函数中 => {
+                write!(格式, "第 {} 行：「返回」只能用在函数中", self.行)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum 语法错误 {
     引号未闭合(char),
@@ -163,6 +248,265 @@ pub fn 解析命令(输入: &str) -> Result<Vec<作业>, 语法错误> {
     };
     解析器.运行()?;
     Ok(解析器.作业列表)
+}
+
+/// 把整段文本解析为语句树（支持控制流）。普通行内容仍交给 [`解析命令`]，
+/// 因此管道、重定向、异步运行、引号、注释等语法全部原样复用。
+pub fn 解析脚本(输入: &str) -> Result<Vec<语句>, 脚本错误> {
+    let 合并后 = 合并续行(输入);
+    let 行列表: Vec<&str> = 合并后.lines().collect();
+    let mut 解析器 = 脚本解析器 {
+        根: Vec::new(),
+        栈: Vec::new(),
+        普通行: Vec::new(),
+    };
+    for (序号, 原文) in 行列表.iter().enumerate() {
+        解析器.处理行(原文, 序号 + 1)?;
+    }
+    解析器.结束(行列表.len() + 1)
+}
+
+/// `\` + 换行是续行，先合并再按行切块，避免块关键字被续行拆开。
+fn 合并续行(输入: &str) -> String {
+    let mut 结果 = String::new();
+    let mut 字符表 = 输入.chars().peekable();
+    while let Some(字符) = 字符表.next() {
+        if 字符 == '\\' && 字符表.peek() == Some(&'\n') {
+            字符表.next();
+        } else {
+            结果.push(字符);
+        }
+    }
+    结果
+}
+
+enum 块帧 {
+    如果 {
+        分支: Vec<(作业, Vec<语句>)>,
+        否则体: Option<Vec<语句>>,
+        起始行: usize,
+    },
+    对于 {
+        变量: String,
+        取值: Vec<词>,
+        体: Vec<语句>,
+        起始行: usize,
+    },
+    每当 {
+        条件: 作业,
+        体: Vec<语句>,
+        起始行: usize,
+    },
+    函数 {
+        名称: String,
+        参数: Vec<String>,
+        体: Vec<语句>,
+        起始行: usize,
+    },
+}
+
+struct 脚本解析器 {
+    根: Vec<语句>,
+    栈: Vec<块帧>,
+    普通行: Vec<String>,
+}
+
+impl 脚本解析器 {
+    /// 当前正在填充的语句列表：栈顶块的体，或根。
+    fn 当前体_mut(&mut self) -> &mut Vec<语句> {
+        if self.栈.is_empty() {
+            return &mut self.根;
+        }
+        match self.栈.last_mut().unwrap() {
+            块帧::对于 { 体, .. } | 块帧::每当 { 体, .. } | 块帧::函数 { 体, .. } => 体,
+            块帧::如果 {
+                分支, 否则体, ..
+            } => {
+                if let Some(体) = 否则体 {
+                    体
+                } else {
+                    &mut 分支.last_mut().unwrap().1
+                }
+            }
+        }
+    }
+
+    fn 加入语句(&mut self, 语句: 语句) {
+        self.当前体_mut().push(语句);
+    }
+
+    fn 在循环中(&self) -> bool {
+        self.栈
+            .iter()
+            .any(|帧| matches!(帧, 块帧::对于 { .. } | 块帧::每当 { .. }))
+    }
+
+    fn 在函数定义中(&self) -> bool {
+        self.栈.iter().any(|帧| matches!(帧, 块帧::函数 { .. }))
+    }
+
+    /// 把攒着的普通行合并解析后放进当前体。
+    fn flush(&mut self, 行号: usize) -> Result<(), 脚本错误> {
+        if self.普通行.is_empty() {
+            return Ok(());
+        }
+        let 文本 = self.普通行.join("\n");
+        self.普通行.clear();
+        let 作业列表 = 解析命令(&文本)
+            .map_err(|原因| 脚本错误 { 行: 行号, 原因: 块错误::底层(原因) })?;
+        if !作业列表.is_empty() {
+            self.加入语句(语句::作业列表(作业列表));
+        }
+        Ok(())
+    }
+
+    fn 解析条件(&self, 文本: &str, 行号: usize) -> Result<作业, 脚本错误> {
+        let 作业列表 = 解析命令(文本)
+            .map_err(|原因| 脚本错误 { 行: 行号, 原因: 块错误::底层(原因) })?;
+        if 作业列表.len() != 1 {
+            return Err(脚本错误 { 行: 行号, 原因: 块错误::如果缺少条件 });
+        }
+        let 作业 = 作业列表.into_iter().next().unwrap();
+        if 作业.后台 {
+            return Err(脚本错误 { 行: 行号, 原因: 块错误::条件不能后台 });
+        }
+        Ok(作业)
+    }
+
+    fn 解析对于头部(&self, 文本: &str, 行号: usize) -> Result<(String, Vec<词>), 脚本错误> {
+        let 格式错 = || 脚本错误 { 行: 行号, 原因: 块错误::对于格式错误 };
+        let 作业列表 = 解析命令(文本)
+            .map_err(|原因| 脚本错误 { 行: 行号, 原因: 块错误::底层(原因) })?;
+        if 作业列表.len() != 1 {
+            return Err(格式错());
+        }
+        let 命令们 = &作业列表[0].管道.命令;
+        if 命令们.len() != 1 {
+            return Err(格式错());
+        }
+        let 词列表 = &命令们[0].词列表;
+        if 词列表.len() < 2 || 词列表[1].文本 != "在" || 词列表[0].文本.is_empty() {
+            return Err(格式错());
+        }
+        Ok((词列表[0].文本.clone(), 词列表[2..].to_vec()))
+    }
+
+    fn 解析函数头部(&self, 文本: &str, 行号: usize) -> Result<(String, Vec<String>), 脚本错误> {
+        let 错 = || 脚本错误 { 行: 行号, 原因: 块错误::函数缺少名称 };
+        let 作业列表 = 解析命令(文本)
+            .map_err(|原因| 脚本错误 { 行: 行号, 原因: 块错误::底层(原因) })?;
+        if 作业列表.len() != 1 {
+            return Err(错());
+        }
+        let 命令们 = &作业列表[0].管道.命令;
+        if 命令们.len() != 1 {
+            return Err(错());
+        }
+        let 词列表 = &命令们[0].词列表;
+        if 词列表.is_empty() {
+            return Err(错());
+        }
+        let 名称 = 词列表[0].文本.clone();
+        let 参数 = 词列表[1..].iter().map(|字| 字.文本.clone()).collect();
+        Ok((名称, 参数))
+    }
+
+    fn 处理行(&mut self, 原文: &str, 行号: usize) -> Result<(), 脚本错误> {
+        let 行 = 原文.trim();
+        let 首词 = 行.split_whitespace().next().unwrap_or("");
+        let 余下 = 行[首词.len()..].trim();
+        match 首词 {
+            "如果" => {
+                self.flush(行号)?;
+                let 条件 = self.解析条件(余下, 行号)?;
+                self.栈.push(块帧::如果 {
+                    分支: vec![(条件, Vec::new())],
+                    否则体: None,
+                    起始行: 行号,
+                });
+            }
+            "或者" => {
+                self.flush(行号)?;
+                let 条件 = self.解析条件(余下, 行号)?;
+                match self.栈.last_mut() {
+                    Some(块帧::如果 { 分支, 否则体, .. }) => {
+                        if 否则体.is_some() {
+                            return Err(脚本错误 { 行: 行号, 原因: 块错误::否则之后不能再有或者 });
+                        }
+                        分支.push((条件, Vec::new()));
+                    }
+                    _ => return Err(脚本错误 { 行: 行号, 原因: 块错误::或者没有匹配的如果 }),
+                }
+            }
+            "否则" => {
+                self.flush(行号)?;
+                match self.栈.last_mut() {
+                    Some(块帧::如果 { 否则体, .. }) => *否则体 = Some(Vec::new()),
+                    _ => return Err(脚本错误 { 行: 行号, 原因: 块错误::或者没有匹配的如果 }),
+                }
+            }
+            "对于" => {
+                self.flush(行号)?;
+                let (变量, 取值) = self.解析对于头部(余下, 行号)?;
+                self.栈.push(块帧::对于 { 变量, 取值, 体: Vec::new(), 起始行: 行号 });
+            }
+            "每当" => {
+                self.flush(行号)?;
+                let 条件 = self.解析条件(余下, 行号)?;
+                self.栈.push(块帧::每当 { 条件, 体: Vec::new(), 起始行: 行号 });
+            }
+            "函数" => {
+                self.flush(行号)?;
+                let (名称, 参数) = self.解析函数头部(余下, 行号)?;
+                self.栈.push(块帧::函数 { 名称, 参数, 体: Vec::new(), 起始行: 行号 });
+            }
+            "返回" => {
+                self.flush(行号)?;
+                if !self.在函数定义中() {
+                    return Err(脚本错误 { 行: 行号, 原因: 块错误::返回不在函数中 });
+                }
+                let 码 = 余下.split_whitespace().next().map(str::to_string);
+                self.加入语句(语句::返回(码));
+            }
+            "结束" => {
+                self.flush(行号)?;
+                let 帧 = self
+                    .栈
+                    .pop()
+                    .ok_or(脚本错误 { 行: 行号, 原因: 块错误::多余的结束 })?;
+                let 语句 = match 帧 {
+                    块帧::如果 { 分支, 否则体, .. } => 语句::如果 { 分支, 否则体 },
+                    块帧::对于 { 变量, 取值, 体, .. } => 语句::对于 { 变量, 取值, 体 },
+                    块帧::每当 { 条件, 体, .. } => 语句::每当 { 条件, 体 },
+                    块帧::函数 { 名称, 参数, 体, .. } => 语句::函数 { 名称, 参数, 体 },
+                };
+                self.加入语句(语句);
+            }
+            "跳出" | "继续" => {
+                self.flush(行号)?;
+                if !self.在循环中() {
+                    return Err(脚本错误 { 行: 行号, 原因: 块错误::循环外跳出或继续 });
+                }
+                self.加入语句(if 首词 == "跳出" { 语句::跳出 } else { 语句::继续 });
+            }
+            _ => self.普通行.push(原文.to_string()),
+        }
+        Ok(())
+    }
+
+    fn 结束(mut self, 行号: usize) -> Result<Vec<语句>, 脚本错误> {
+        self.flush(行号)?;
+        if let Some(帧) = self.栈.first() {
+            let 起始行 = match 帧 {
+                块帧::如果 { 起始行, .. }
+                | 块帧::对于 { 起始行, .. }
+                | 块帧::每当 { 起始行, .. }
+                | 块帧::函数 { 起始行, .. } => *起始行,
+            };
+            return Err(脚本错误 { 行: 起始行, 原因: 块错误::未完成 });
+        }
+        Ok(self.根)
+    }
 }
 
 impl<'a> 解析器<'a> {
@@ -929,5 +1273,92 @@ mod 测试 {
         let 作业列表 = 解析命令("make 2>&1").unwrap();
         assert!(作业列表[0].合并错误);
         assert!(作业列表[0].管道.连接.is_empty());
+    }
+
+    #[test]
+    fn 解析脚本控制流() {
+        // 如果 / 否则
+        let 语句列表 = 解析脚本("如果 true\necho 是\n否则\necho 否\n结束").unwrap();
+        assert_eq!(语句列表.len(), 1);
+        match &语句列表[0] {
+            语句::如果 { 分支, 否则体 } => {
+                assert_eq!(分支.len(), 1);
+                assert_eq!(否则体.as_ref().unwrap().len(), 1);
+            }
+            _ => panic!("应为如果语句"),
+        }
+
+        // 或者分支
+        let 语句列表 =
+            解析脚本("如果 false\necho 一\n或者 true\necho 二\n否则\necho 三\n结束").unwrap();
+        match &语句列表[0] {
+            语句::如果 { 分支, 否则体 } => {
+                assert_eq!(分支.len(), 2);
+                assert!(否则体.is_some());
+            }
+            _ => panic!("应为如果语句"),
+        }
+
+        // 对于 / 每当
+        let 语句列表 = 解析脚本("对于 项 在 甲 乙\necho $项\n结束").unwrap();
+        match &语句列表[0] {
+            语句::对于 { 变量, 取值, 体 } => {
+                assert_eq!(变量, "项");
+                assert_eq!(取值.len(), 2);
+                assert_eq!(体.len(), 1);
+            }
+            _ => panic!("应为对于语句"),
+        }
+        let 语句列表 = 解析脚本("每当 true\necho 圈\n结束").unwrap();
+        assert!(matches!(&语句列表[0], 语句::每当 { .. }));
+
+        // 嵌套
+        let 语句列表 =
+            解析脚本("对于 外 在 甲\n如果 true\n对于 内 在 一\necho x\n结束\n结束\n结束").unwrap();
+        assert_eq!(语句列表.len(), 1);
+
+        // 未闭合 / 多余结束 / 循环外跳出
+        assert_eq!(解析脚本("如果 true\necho x").unwrap_err().原因, 块错误::未完成);
+        assert_eq!(解析脚本("结束").unwrap_err().原因, 块错误::多余的结束);
+        assert_eq!(
+            解析脚本("跳出").unwrap_err().原因,
+            块错误::循环外跳出或继续
+        );
+        // 条件不能后台
+        assert_eq!(
+            解析脚本("如果 异步运行 true\necho x\n结束").unwrap_err().原因,
+            块错误::条件不能后台
+        );
+
+        // 引号包住时不当关键字
+        let 语句列表 = 解析脚本("\"如果\" arg").unwrap();
+        assert!(matches!(&语句列表[0], 语句::作业列表(_)));
+    }
+
+    #[test]
+    fn 解析脚本函数() {
+        let 语句列表 = 解析脚本("函数 问候 名字\necho 你好\n返回\n结束\n问候 世界").unwrap();
+        assert_eq!(语句列表.len(), 2);
+        match &语句列表[0] {
+            语句::函数 { 名称, 参数, 体 } => {
+                assert_eq!(名称, "问候");
+                assert_eq!(参数.len(), 1);
+                assert_eq!(参数[0], "名字");
+                assert_eq!(体.len(), 2);
+                assert!(matches!(&体[1], 语句::返回(_)));
+            }
+            _ => panic!("应为函数语句"),
+        }
+        assert!(matches!(&语句列表[1], 语句::作业列表(_)));
+
+        // 返回在函数外 / 函数缺名称
+        assert_eq!(
+            解析脚本("返回 1").unwrap_err().原因,
+            块错误::返回不在函数中
+        );
+        assert_eq!(
+            解析脚本("函数\n结束").unwrap_err().原因,
+            块错误::函数缺少名称
+        );
     }
 }

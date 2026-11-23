@@ -39,7 +39,7 @@ impl<'a> 释义器<'a> {
     }
 
     /// 展开一个词为若干实参（变量 / `~` / 通配）。
-    fn 展开(&self, 字: &词) -> Vec<String> {
+    pub fn 展开(&self, 字: &词) -> Vec<String> {
         let 查变量 = |名称: &str| self.查变量(名称);
         展开词(字, &查变量)
     }

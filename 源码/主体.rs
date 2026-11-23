@@ -25,7 +25,7 @@ fn main() {
         Some("-c") => {
             当前壳.加载启动文件();
             let 命令文本 = 命令行参数.get(1).cloned().unwrap_or_default();
-            let 状态 = 当前壳.运行一行(&命令文本);
+            let 状态 = 当前壳.运行脚本文本(&命令文本);
             std::process::exit(if 当前壳.退出 {
                 当前壳.退出码
             } else {
@@ -67,22 +67,41 @@ fn main() {
     let 标准输入 = std::io::stdin();
     let mut 读取器 = 标准输入.lock();
     let mut 当前行 = String::new();
+    let mut 续行 = false;
     loop {
         if 是交互终端 {
-            print!("{}", 当前壳.提示符());
+            if 续行 {
+                print!("> ");
+            } else {
+                print!("{}", 当前壳.提示符());
+            }
             let _ = std::io::stdout().flush();
         }
         当前行.clear();
         // 必须复用同一个读取器：stdin 的缓冲区在锁之间共享，反复获取锁会把已读数据丢掉
         match 读取器.read_line(&mut 当前行) {
-            Ok(0) => break, // 输入结束（Ctrl-D）
+            Ok(0) => {
+                // Ctrl-D：块没写完要报错并丢弃缓冲，避免污染后续输入
+                if !当前壳.块缓冲.is_empty() {
+                    eprintln!("语法错误：块未结束");
+                    当前壳.块缓冲.clear();
+                    当前壳.最后状态 = 2;
+                }
+                break;
+            }
             Ok(_) => {}
             Err(错误) => {
                 eprintln!("读取输入失败：{错误}");
                 break;
             }
         }
-        当前壳.运行一行(&当前行);
+        match 当前壳.运行输入(&当前行) {
+            模块::壳::运行反馈::完成(码) => {
+                当前壳.最后状态 = 码;
+                续行 = false;
+            }
+            模块::壳::运行反馈::继续 => 续行 = true,
+        }
         if 当前壳.退出 {
             break;
         }
