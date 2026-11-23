@@ -16,9 +16,8 @@ dirs = "7"                                        # 跨平台家目录
 glob = "0.3"                                      # shell 风格通配匹配（替代手写）
 libc = "0.2"                                      # C 库绑定（替代手写 extern）
 rustyline = "17"                                  # 交互行编辑（历史 / 方向键）
-serde = { version = "1", features = ["derive"] }  # 值类型序列化
-serde_json = "1"                                  # JSON 导入导出
 thiserror = "2"                                   # 错误类型派生
+# 注：JSON 读写与值类型序列化已改为手写（源码/模块/值.rs），本 crate 不再依赖 serde
 
 # 最激进优化：全力换运行速度/体积，牺牲编译时间。
 [profile.release]

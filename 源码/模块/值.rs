@@ -3,12 +3,13 @@
 //! 对象只是**有序键值对数据**，没有方法、没有类、没有继承——不是 OOP。
 //! 数组与对象可以互相嵌套，也可以用 `$变量` 把 shell 变量的值取进来。
 
+// 与既有命名风格一致：JSON 作为名字的一部分保留大写
+#![allow(non_snake_case)]
+
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
-
 /// 运行时值。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum 值 {
     整数(i64),
     文本(String),
@@ -36,10 +37,10 @@ impl 值 {
         }
     }
 
-    /// 序列化为 JSON（借助 serde_json）。
+    /// 序列化为 JSON（与 `写JSON` 相同，保留旧名字）。
     #[allow(non_snake_case)]
     pub fn 转JSON(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        self.写JSON()
     }
 
     /// 转成退出码：整数取自身；文本若是数字也按数字取，其余视为成功（0）。
@@ -50,6 +51,212 @@ impl 值 {
             _ => 0,
         }
     }
+}
+
+impl 值 {
+    /// 读取 JSON 文本：对象是 `值::对象`（保持键序），数组是 `值::数组`，
+    /// 整数在 i64 范围内取整数，其它数字/布尔/空值按文本。不是合法 JSON 时返回 None。
+    pub fn 读JSON(文本: &str) -> Option<值> {
+        let 字节 = 文本.trim().as_bytes();
+        let mut 读位 = 0;
+        let 结果 = 读JSON值(字节, &mut 读位)?;
+        跳过空白(字节, &mut 读位);
+        if 读位 == 字节.len() {
+            Some(结果)
+        } else {
+            None
+        }
+    }
+
+    /// 写成 JSON 文本（键序保持不变）。
+    pub fn 写JSON(&self) -> String {
+        let mut 输出 = String::new();
+        写JSON值(self, &mut 输出);
+        输出
+    }
+}
+
+fn 跳过空白(字节: &[u8], 读位: &mut usize) {
+    while *读位 < 字节.len() && matches!(字节[*读位], b' ' | b'\t' | b'\r' | b'\n') {
+        *读位 += 1;
+    }
+}
+
+fn 读JSON值(字节: &[u8], 读位: &mut usize) -> Option<值> {
+    跳过空白(字节, 读位);
+    match *字节.get(*读位)? {
+        b'{' => {
+            *读位 += 1;
+            let mut 项们 = Vec::new();
+            跳过空白(字节, 读位);
+            if 字节.get(*读位) == Some(&b'}') {
+                *读位 += 1;
+                return Some(值::对象(项们));
+            }
+            loop {
+                跳过空白(字节, 读位);
+                let 键 = 读JSON文本(字节, 读位)?;
+                跳过空白(字节, 读位);
+                if 字节.get(*读位) != Some(&b':') {
+                    return None;
+                }
+                *读位 += 1;
+                项们.push((键, 读JSON值(字节, 读位)?));
+                跳过空白(字节, 读位);
+                match 字节.get(*读位)? {
+                    b',' => *读位 += 1,
+                    b'}' => {
+                        *读位 += 1;
+                        return Some(值::对象(项们));
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        b'[' => {
+            *读位 += 1;
+            let mut 项们 = Vec::new();
+            跳过空白(字节, 读位);
+            if 字节.get(*读位) == Some(&b']') {
+                *读位 += 1;
+                return Some(值::数组(项们));
+            }
+            loop {
+                项们.push(读JSON值(字节, 读位)?);
+                跳过空白(字节, 读位);
+                match 字节.get(*读位)? {
+                    b',' => *读位 += 1,
+                    b']' => {
+                        *读位 += 1;
+                        return Some(值::数组(项们));
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        b'"' => Some(值::文本(读JSON文本(字节, 读位)?)),
+        b't' if 字节[*读位..].starts_with(b"true") => {
+            *读位 += 4;
+            Some(值::文本("true".into()))
+        }
+        b'f' if 字节[*读位..].starts_with(b"false") => {
+            *读位 += 5;
+            Some(值::文本("false".into()))
+        }
+        b'n' if 字节[*读位..].starts_with(b"null") => {
+            *读位 += 4;
+            Some(值::文本(String::new()))
+        }
+        _ => {
+            let 起点 = *读位;
+            while *读位 < 字节.len() && matches!(字节[*读位], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9') {
+                *读位 += 1;
+            }
+            if 起点 == *读位 {
+                return None;
+            }
+            let 数字 = std::str::from_utf8(&字节[起点..*读位]).ok()?;
+            match 数字.parse::<i64>() {
+                Ok(整数) => Some(值::整数(整数)),
+                Err(_) => Some(值::文本(数字.to_string())),
+            }
+        }
+    }
+}
+
+fn 读JSON文本(字节: &[u8], 读位: &mut usize) -> Option<String> {
+    if 字节.get(*读位) != Some(&b'"') {
+        return None;
+    }
+    *读位 += 1;
+    let mut 输出 = String::new();
+    loop {
+        let 字节值 = *字节.get(*读位)?;
+        *读位 += 1;
+        match 字节值 {
+            b'"' => return Some(输出),
+            b'\\' => {
+                let 转义 = *字节.get(*读位)?;
+                *读位 += 1;
+                match 转义 {
+                    b'"' => 输出.push('"'),
+                    b'\\' => 输出.push('\\'),
+                    b'/' => 输出.push('/'),
+                    b'b' => 输出.push('\u{8}'),
+                    b'f' => 输出.push('\u{c}'),
+                    b'n' => 输出.push('\n'),
+                    b'r' => 输出.push('\r'),
+                    b't' => 输出.push('\t'),
+                    b'u' => {
+                        let 十六 = std::str::from_utf8(字节.get(*读位..*读位 + 4)?).ok()?;
+                        *读位 += 4;
+                        let 码 = u32::from_str_radix(十六, 16).ok()?;
+                        输出.push(char::from_u32(码).unwrap_or('\u{fffd}'));
+                    }
+                    _ => return None,
+                }
+            }
+            控制 if 控制 < b' ' => return None,
+            _ => {
+                // 非转义字节：按 UTF-8 解码一个字符（可能多字节）
+                let 起点 = *读位 - 1;
+                let 长度 = match 字节值 {
+                    0x00..=0x7f => 1,
+                    0xc0..=0xdf => 2,
+                    0xe0..=0xef => 3,
+                    _ => 4,
+                };
+                let 段 = 字节.get(起点..起点 + 长度)?;
+                *读位 = 起点 + 长度;
+                输出.push_str(std::str::from_utf8(段).ok()?);
+            }
+        }
+    }
+}
+
+fn 写JSON值(项: &值, 输出: &mut String) {
+    match 项 {
+        值::整数(数) => 输出.push_str(&数.to_string()),
+        值::文本(文本) => 写JSON文本(文本, 输出),
+        值::数组(项们) => {
+            输出.push('[');
+            for (序, 子项) in 项们.iter().enumerate() {
+                if 序 > 0 {
+                    输出.push(',');
+                }
+                写JSON值(子项, 输出);
+            }
+            输出.push(']');
+        }
+        值::对象(项们) => {
+            输出.push('{');
+            for (序, (键, 子项)) in 项们.iter().enumerate() {
+                if 序 > 0 {
+                    输出.push(',');
+                }
+                写JSON文本(键, 输出);
+                输出.push(':');
+                写JSON值(子项, 输出);
+            }
+            输出.push('}');
+        }
+    }
+}
+
+fn 写JSON文本(文本: &str, 输出: &mut String) {
+    输出.push('"');
+    for 字符 in 文本.chars() {
+        match 字符 {
+            '"' => 输出.push_str("\\\""),
+            '\\' => 输出.push_str("\\\\"),
+            '\n' => 输出.push_str("\\n"),
+            '\r' => 输出.push_str("\\r"),
+            '\t' => 输出.push_str("\\t"),
+            控制 if (控制 as u32) < 0x20 => 输出.push_str(&format!("\\u{:04x}", 控制 as u32)),
+            其它 => 输出.push(其它),
+        }
+    }
+    输出.push('"');
 }
 
 impl fmt::Display for 值 {
@@ -291,6 +498,19 @@ mod 测试 {
             值,
             值::数组(vec![值::文本("1".into()), 值::文本("你好".into())])
         );
+    }
+
+    #[test]
+    fn JSON往返() {
+        for 原文 in [r#"{"a":"x","n":3}"#, r#"[1,2,"三"]"#, r#""文本""#, r#"7"#] {
+            let 值 = 值::读JSON(原文).unwrap();
+            assert_eq!(值::读JSON(&值.写JSON()).unwrap(), 值);
+        }
+        assert_eq!(
+            值::读JSON(r#"{"n":3}"#).unwrap(),
+            值::对象(vec![("n".into(), 值::整数(3))])
+        );
+        assert!(值::读JSON("{不是JSON}").is_none());
     }
 
     #[test]

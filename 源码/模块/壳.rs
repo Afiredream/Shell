@@ -281,6 +281,12 @@ impl 壳 {
                 self.返回值 = 返回值.clone();
                 self.变量.insert("返回值".into(), 返回值.转文本());
                 self.变量.insert("返回值JSON".into(), 返回值.转JSON());
+                // `$参数对象` 常用于验证解析结果：它能再还原成对象（数组、选项、剩余）
+                if let Some(对象) = 值::值::读JSON(&返回值.转JSON()) {
+                    if let 运行时值::对象(_) = 对象 {
+                        self.变量.insert("返回值对象".into(), 对象.转文本());
+                    }
+                }
                 self.最后状态 = 退出码;
                 流::返回(退出码)
             }
@@ -653,9 +659,41 @@ mod 测试 {
         assert_eq!(实例.变量.get("0").map(String::as_str), Some("脚本.壳"));
         assert_eq!(实例.变量.get("1").map(String::as_str), Some("甲"));
         assert_eq!(实例.变量.get("2").map(String::as_str), Some("乙"));
-        assert!(实例.变量.get("3").is_none());
+        assert!(!实例.变量.contains_key("3"));
         // 位置参数只在 shell 内部，不写进进程环境
         assert_eq!(std::env::var_os("1"), 原有一);
+    }
+
+    #[test]
+    fn 默认参数变量() {
+        let mut 实例 = 壳::新建();
+        // 没有参数
+        实例.设置位置参数("脚本", &[]);
+        实例.运行脚本文本("个数=$参数个数; 列表=[$参数列表]");
+        assert_eq!(实例.变量.get("个数").map(String::as_str), Some("0"));
+        assert_eq!(实例.变量.get("列表").map(String::as_str), Some("[]"));
+
+        // 选项、= 数据、-- 分隔、剩余
+        实例.设置位置参数(
+            "脚本",
+            &[
+                "构建".into(),
+                "--release".into(),
+                "--输出".into(),
+                "json".into(),
+                "--file=数据.txt".into(),
+                "--".into(),
+                "剩余一".into(),
+            ],
+        );
+        实例.运行脚本文本("对象=$参数对象; 个数=$参数个数");
+        assert_eq!(实例.变量.get("个数").map(String::as_str), Some("7"));
+        assert_eq!(
+            实例.变量.get("对象").map(String::as_str),
+            Some(
+                r#"{"命令行":["构建","json"],"选项":{"release":"true","输出":"true","file":"数据.txt"},"分隔符":"--","剩余":["剩余一"]}"#
+            )
+        );
     }
 
     #[test]

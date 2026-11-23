@@ -36,14 +36,88 @@ impl<'a> 释义器<'a> {
             "?" => return Some(self.最后状态.to_string()),
             "$" => return Some(std::process::id().to_string()),
             "!" => return Some(super::执行::最后后台进程().to_string()),
-            "#" => return Some(self.位置参数().len().to_string()),
-            "@" | "*" => return Some(self.位置参数().join(" ")),
+            "#" => return Some(self.参数个数().to_string()),
+            "@" | "*" => return Some(self.参数列表().join(" ")),
+            // 壳语言默认变量：位置参数按 `--`/`-` 分隔后再取值
+            "参数列表" => return Some(self.参数列表().join(" ")),
+            "参数个数" => return Some(self.参数个数().to_string()),
+            "参数对象" => return Some(self.参数对象().写JSON()),
             _ => {}
         }
         if let Some(值) = self.环境表.get(名称) {
             return Some(值.clone());
         }
         std::env::var(名称).ok()
+    }
+
+    /// 位置参数：按序号排好的 `$1`、`$2`……（给 `$@`、`$#`、`$参数列表` 用）。
+    fn 参数列表(&self) -> Vec<String> {
+        self.位置参数()
+    }
+
+    /// `$#` 与 `$参数个数` 共用。
+    fn 参数个数(&self) -> usize {
+        self.位置参数().len()
+    }
+
+    /// `$参数对象`：标准参数解析的结果，形如
+    /// `{"命令行":["a"],"选项":{"v":"true","n":"3"},"分隔符":"--","剩余":["x"]}`。
+    ///
+    /// - `选项.名称` 存去掉全部前导 `-` 后的选项名，有 `=数据` 时取数据，否则为 `"true"`；
+    /// - `-` 是「标准输入」的惯用写法，记为 `选项.-  = "true"`；
+    /// - 第一个 `--` 起的内容进 `剩余`，`分隔符` 记为 `"--"`；
+    /// - 单独的 `--选项` 后面紧跟一个不以 `-` 开头、且不是 `--` 的词时，把该词当作它的数据。
+    fn 参数对象(&self) -> super::值::值 {
+        use super::值::值 as 运行值;
+        let 文本 = |项: &str| 运行值::文本(项.to_string());
+
+        let 参数 = self.位置参数();
+        let mut 命令行 = Vec::new();
+        let mut 选项: Vec<(String, 运行值)> = Vec::new();
+        let mut 分隔符 = String::new();
+        let mut 剩余 = Vec::new();
+
+        let mut 序 = 0;
+        while 序 < 参数.len() {
+            let 某项 = 参数[序].as_str();
+            序 += 1;
+            if 某项 == "--" {
+                分隔符 = "--".to_string();
+                剩余.extend(参数[序..].iter().map(|项| 文本(项)));
+                break;
+            }
+            if 某项 == "-" {
+                选项.push(("-".to_string(), 文本("true")));
+                continue;
+            }
+            let Some(体) = 某项.strip_prefix("--").or_else(|| 某项.strip_prefix('-')) else {
+                命令行.push(文本(某项));
+                continue;
+            };
+            match 体.split_once('=') {
+                Some((名, 数据)) => 选项.push((名.to_string(), 文本(数据))),
+                None if 体.is_empty() => 命令行.push(文本(某项)),
+                None => {
+                    let 纯选项 = !某项.starts_with("--");
+                    let 下个是本选项的数据 = 纯选项
+                        && 参数.get(序).is_some_and(|下个| !下个.starts_with('-'));
+                    let 选项数据 = if 下个是本选项的数据 {
+                        序 += 1;
+                        参数[序 - 1].clone()
+                    } else {
+                        "true".to_string()
+                    };
+                    选项.push((体.to_string(), 文本(&选项数据)));
+                }
+            }
+        }
+
+        运行值::对象(vec![
+            ("命令行".to_string(), 运行值::数组(命令行)),
+            ("选项".to_string(), 运行值::对象(选项)),
+            ("分隔符".to_string(), 文本(&分隔符)),
+            ("剩余".to_string(), 运行值::数组(剩余)),
+        ])
     }
 
     /// 数字键（除 `0`）按序收集的位置参数。
