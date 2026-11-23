@@ -30,7 +30,6 @@ impl<'a> Planner<'a> {
             "$" => return Some(std::process::id().to_string()),
             "!" => return Some(last_background_pid().to_string()),
             "#" => return Some(self.arg_count().to_string()),
-            "@" | "*" => return Some(self.arg_list().join(" ")),
             
             "参数" => return Some(self.arg_list().into_iter().next().unwrap_or_default()),
             "参数列表" => return Some(self.arg_list().join(" ")),
