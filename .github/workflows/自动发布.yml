@@ -2,7 +2,9 @@
 #
 # 触发方式：
 #   1. 在 GitHub 网页或 gh 里发布（Publish）一个 Release —— 自动编译并附加到该 Release；
-#   2. Actions →「自动发布 Linux 版本」→ Run workflow（可填写版本号、标签，并选择是否创建 Release）。
+#   2. Actions →「自动发布 Linux 版本」→ Run workflow（选择是否创建 Release）。
+#
+# 版本号一律从 Cargo.toml 读取，发布标签为 v<版本号>；不需要也不能手工填写。
 #
 # 产物：壳-<版本>-<架构>.tar.gz 与同名 .sha256，里面是可执行文件「壳」和 README、LICENSE。
 #
@@ -15,15 +17,8 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    # 版本号一律读取 Cargo.toml，不再手工填写
     inputs:
-      版本号:
-        description: "版本号（例如 0.1.0）；留空则读取 Cargo.toml"
-        required: false
-        type: string
-      标签:
-        description: "Release 标签（例如 v0.1.0）；留空则用 v<版本号>"
-        required: false
-        type: string
       创建Release:
         description: "手动触发时，是否创建（或更新）对应的 Release"
         required: false
@@ -47,26 +42,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 读取版本号
+      - name: 读取 Cargo.toml 的版本号
         id: read
         shell: bash
         run: |
           set -euo pipefail
-          # Cargo.toml 里的 version = "x.y.z"
-          crate_version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
-          version="${{ inputs.版本号 }}"
-          tag="${{ inputs.标签 }}"
-          if [ -z "$version" ]; then version="$crate_version"; fi
-          if [ -z "$tag" ]; then
-            if [ "${{ github.event_name }}" = "release" ]; then
-              tag="${{ github.event.release.tag_name }}"
-            else
-              tag="v${version}"
-            fi
+          # Cargo.toml 里的 version = "x.y.z"（只取 [package] 段的第一个 version）
+          version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
+          if [ -z "$version" ]; then
+            echo "::error::没有从 Cargo.toml 读到版本号"
+            exit 1
           fi
+          # 标签统一由版本号生成：v<Cargo.toml 中的版本号>
+          tag="v${version}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "版本：$version，标签：$tag"
+          echo "Cargo.toml 版本：$version，发布标签：$tag"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            release_tag="${{ github.event.release.tag_name }}"
+            if [ "$release_tag" != "$tag" ]; then
+              echo "::warning::这个 Release 的标签是 $release_tag，而 Cargo.toml 的版本对应 $tag；以 Cargo.toml 为准。"
+            fi
+          fi
 
   build:
     name: 编译 ${{ matrix.target }}（${{ matrix.arch }}）
@@ -138,7 +135,8 @@ jobs:
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.prepare.outputs.tag }}
+          # 直接用当前 Release 的标签，保证文件挂到触发它的那个 Release 上
+          tag_name: ${{ github.event.release.tag_name }}
           files: |
             ${{ steps.pack.outputs.archive }}
             ${{ steps.pack.outputs.checksum }}
