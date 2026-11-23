@@ -4,6 +4,7 @@ use crate::value::*;
 pub(crate) struct Word {
     pub(crate) text: String,
     pub(crate) literal_flags: Vec<bool>,
+    pub(crate) quoted_flags: Vec<bool>,
     
     pub(crate) has_dquote: bool,
 }
@@ -13,12 +14,20 @@ impl Word {
     pub(crate) fn push_char(&mut self, ch: char, is_literal: bool) {
         self.text.push(ch);
         self.literal_flags.push(is_literal);
+        self.quoted_flags.push(false);
+    }
+
+    pub(crate) fn push_quoted(&mut self, ch: char, is_literal: bool) {
+        self.text.push(ch);
+        self.literal_flags.push(is_literal);
+        self.quoted_flags.push(true);
     }
 
     
     pub(crate) fn drop_prefix(&mut self, count: usize) {
         self.text = self.text.chars().skip(count).collect();
         self.literal_flags.drain(..count.min(self.literal_flags.len()));
+        self.quoted_flags.drain(..count.min(self.quoted_flags.len()));
     }
 }
 
@@ -69,6 +78,7 @@ pub(crate) struct Job {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Stmt {
     
     Jobs(Vec<Job>),
@@ -232,6 +242,7 @@ pub(crate) struct BlockFrame {
     pub(crate) kind: BlockKind,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum BlockKind {
     If {
         branches: Vec<(Job, Vec<Stmt>)>,
@@ -637,14 +648,14 @@ impl<'a> Lexer<'a> {
                 self.cursor += 1;
                 match self.peek(0) {
                     Some(next_byte) => {
-                        target.push_char(next_byte, from_single);
+                        target.push_quoted(next_byte, from_single);
                         self.cursor += 1;
                     }
                     None => return Err(SyntaxError::TrailingBackslash),
                 }
                 continue;
             }
-            target.push_char(inner, from_single);
+            target.push_quoted(inner, from_single);
             self.cursor += 1;
         }
         Err(SyntaxError::UnclosedQuote(quote))
@@ -660,7 +671,7 @@ impl<'a> Lexer<'a> {
                         None => return Err(SyntaxError::TrailingBackslash),
                         Some('\n') => self.cursor += 1,
                         Some(next_byte) => {
-                            self.current_word_mut().push_char(next_byte, false);
+                            self.current_word_mut().push_quoted(next_byte, false);
                             self.cursor += 1;
                         }
                     }
@@ -736,7 +747,7 @@ impl<'a> Lexer<'a> {
                             .map_or(0, |word| word.text.chars().count());
                         self.eq_index = Some(typed);
                     }
-                    self.current_word_mut().text.push(ch);
+                    self.current_word_mut().push_char(ch, false);
                     self.cursor += 1;
                 }
             }
@@ -828,12 +839,12 @@ impl<'a> Lexer<'a> {
                 match self.peek(0) {
                     Some(next_byte) if from_single && next_byte == '\'' => {
                         self.cursor += 1;
-                        self.current_word_mut().push_char('\'', true);
+                        self.current_word_mut().push_quoted('\'', true);
                         continue;
                     }
                     Some(next_byte @ ('$' | '`' | '"' | '\\')) if !from_single => {
                         self.cursor += 1;
-                        self.current_word_mut().push_char(next_byte, false);
+                        self.current_word_mut().push_quoted(next_byte, false);
                         continue;
                     }
                     Some('\n') => {
@@ -842,14 +853,14 @@ impl<'a> Lexer<'a> {
                     }
                     Some(other) if !from_single => {
                         let current_word = self.current_word_mut();
-                        current_word.push_char('\\', false);
-                        current_word.push_char(other, false);
+                        current_word.push_quoted('\\', false);
+                        current_word.push_quoted(other, false);
                         self.cursor += 1;
                         continue;
                     }
                     Some(other) => {
                         
-                        self.current_word_mut().push_char('\\', true);
+                        self.current_word_mut().push_quoted('\\', true);
                         let _ = other;
                         continue;
                     }
@@ -862,7 +873,7 @@ impl<'a> Lexer<'a> {
                 self.read_cmdsub()?;
                 continue;
             }
-            self.current_word_mut().push_char(ch, from_single);
+            self.current_word_mut().push_quoted(ch, from_single);
         }
         Err(SyntaxError::UnclosedQuote(quote))
     }
@@ -879,7 +890,122 @@ pub(crate) fn expand_word(
     if let Some(matches) = expand_wildcard(word, &text) {
         return matches;
     }
-    vec![text]
+    split_fields(word, &text)
+}
+
+fn dollar_end(chars: &[char], index: usize) -> usize {
+    let mut end = index + 1;
+    match chars.get(end) {
+        None => end,
+        Some('{') => {
+            end += 1;
+            while end < chars.len() && chars[end] != '}' {
+                end += 1;
+            }
+            (end + 1).min(chars.len())
+        }
+        Some('(') => {
+            let mut depth = 0usize;
+            while end < chars.len() {
+                match chars[end] {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return end + 1;
+                        }
+                    }
+                    _ => {}
+                }
+                end += 1;
+            }
+            end
+        }
+        Some(&first) if is_name_char(first) => {
+            while end < chars.len() && is_name_char(chars[end]) {
+                end += 1;
+            }
+            end
+        }
+        Some(&'?' | &'$' | &'!' | &'#') => end + 1,
+        _ => end,
+    }
+}
+
+
+fn split_fields(word: &Word, text: &str) -> Vec<String> {
+    if !word.quoted_flags.iter().any(|&quoted| !quoted) {
+        return vec![text.to_string()];
+    }
+    let sources: Vec<char> = word.text.chars().collect();
+    let mut fields: Vec<String> = Vec::new();
+    let mut field = String::new();
+    let mut typed = false;
+    let mut at = 0usize;
+    let mut slot = 0usize;
+    let mut stop: Option<usize> = None;
+    let protected_at = |index: usize| {
+        word.quoted_flags.get(index).copied().unwrap_or(false)
+            || (index > 0 && sources.get(index - 1) == Some(&'\\'))
+    };
+    let flush = |fields: &mut Vec<String>, field: &mut String, typed: &mut bool| {
+        if !field.is_empty() || *typed {
+            fields.push(std::mem::take(field));
+        }
+        *typed = false;
+    };
+    while let Some(ch) = text[at..].chars().next() {
+        if let Some(stop_slot) = stop {
+            if slot == stop_slot {
+                stop = None;
+            } else {
+                if !ch.is_whitespace() || protected_at(slot) {
+                    field.push(ch);
+                    typed = true;
+                } else {
+                    flush(&mut fields, &mut field, &mut typed);
+                }
+                at += ch.len_utf8();
+                continue;
+            }
+        }
+        if slot >= sources.len() {
+            if !ch.is_whitespace() {
+                field.push(ch);
+                typed = true;
+            } else {
+                flush(&mut fields, &mut field, &mut typed);
+            }
+            at += ch.len_utf8();
+            continue;
+        }
+        if sources[slot] == ch {
+            if !protected_at(slot) && ch.is_whitespace() {
+                flush(&mut fields, &mut field, &mut typed);
+            } else {
+                field.push(ch);
+                typed = true;
+            }
+            slot += 1;
+            at += ch.len_utf8();
+            continue;
+        }
+        if sources[slot] == '$' && !word.quoted_flags.get(slot).copied().unwrap_or(false) {
+            let mut end = dollar_end(&sources, slot);
+            while end < sources.len() && word.quoted_flags.get(end).copied().unwrap_or(false) {
+                end += 1;
+            }
+            stop = (end < sources.len()).then_some(end);
+            slot = end;
+            continue;
+        }
+        slot += 1;
+    }
+    flush(&mut fields, &mut field, &mut typed);
+    if fields.is_empty() {
+        fields.push(String::new());
+    }
+    fields
 }
 
 #[allow(clippy::type_complexity)]
@@ -1256,13 +1382,13 @@ mod lexer_tests {
         let jobs = parse_command(r#"x="$(读取文本 配置.json --类型 JSON)""#).unwrap();
         let value_word = &jobs[0].pipeline.commands[0].assigns[0].1;
         let expanded = expand_word(value_word, &|_| None, &|commands, _| format!("CMD[{commands}]"));
-        assert_eq!(expanded, vec!["CMD[读取文本 配置.json --类型 JSON]"]);
+        assert_eq!(expanded, vec!["CMD[读取文本", "配置.json", "--类型", "JSON]"]);
 
         let jobs = parse_command(r#"x="$(回显 甲)""#).unwrap();
         let value_word = &jobs[0].pipeline.commands[0].assigns[0].1;
         assert_eq!(
             expand_word(value_word, &|_| None, &|commands, _| format!("<{commands}>")),
-            vec!["<回显 甲>"]
+            vec!["<回显", "甲>"]
         );
     }
 
@@ -1274,7 +1400,7 @@ mod lexer_tests {
         assert_eq!(commands.assigns.len(), 1);
         let value_word = &commands.assigns[0].1;
         let expanded = expand_word(value_word, &|_| None, &|commands, _| format!("CMD[{commands}]"));
-        assert_eq!(expanded, vec!["CMD[echo \"a b\"]"]);
+        assert_eq!(expanded, vec!["CMD[echo", "\"a", "b\"]"]);
     }
 
     #[test]
