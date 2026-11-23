@@ -1,7 +1,6 @@
-use libc::{c_char, c_int};
+use libc::c_int;
 use std::io::{self, Write};
 use std::collections::HashMap;
-use crate::sys::*;
 use crate::value::*;
 
 pub(crate) struct Context<'a> {
@@ -37,7 +36,6 @@ pub(crate) enum Builtin {
     DeleteVar,
     Echo,
     Print,
-    Exec,
     True,
     False,
     Export,
@@ -55,7 +53,6 @@ pub(crate) const ALL: &[(&str, Builtin)] = &[
     ("删除", Builtin::DeleteVar),
     ("回显", Builtin::Echo),
     ("输出", Builtin::Print),
-    ("同步运行", Builtin::Exec),
     ("正常", Builtin::True),
     ("错误", Builtin::False),
     ("读取文本", Builtin::ReadFile),
@@ -99,7 +96,6 @@ impl Builtin {
                 print_raw(args);
                 0
             }
-            Self::Exec => exec_replace(args),
             Self::ReadFile => Self::run_read_file(args, ctx),
             Self::WriteFile => Self::run_write_file(args, ctx),
             Self::True => 0,
@@ -433,39 +429,6 @@ pub(crate) fn list_vars(ctx: &mut Context) {
     let mut out = io::stdout().lock();
     for (key, val) in entries {
         let _ = writeln!(out, "{key}={val}");
-    }
-}
-
-pub(crate) fn exec_replace(args: &[String]) -> c_int {
-    use std::ffi::CString;
-
-    if args.is_empty() {
-        return 0;
-    }
-    
-    let argv: Vec<CString> = args
-        .iter()
-        .map(|text| CString::new(text.as_str()).unwrap_or_default())
-        .collect();
-    let pointers: Vec<*const c_char> = argv
-        .iter()
-        .map(|args| args.as_ptr())
-        .chain(std::iter::once(std::ptr::null()))
-        .collect();
-
-    sys_execvp(pointers[0], pointers.as_ptr());
-    
-    let source = io::Error::last_os_error();
-    let message = match source.kind() {
-        io::ErrorKind::NotFound => format!("同步运行: {}: 未找到命令\n", args[0]),
-        io::ErrorKind::PermissionDenied => format!("同步运行: {}: 权限不足\n", args[0]),
-        _ => format!("同步运行: {}: {source}\n", args[0]),
-    };
-    let _ = io::stderr().write_all(message.as_bytes());
-    if source.kind() == io::ErrorKind::NotFound {
-        127
-    } else {
-        126
     }
 }
 

@@ -312,6 +312,14 @@ impl Shell {
 
     
     
+    fn exec_keyword(spec: &PipelineSpec) -> bool {
+        spec.commands
+            .first()
+            .is_some_and(|simple| {
+                matches!(simple.arg_list.first().map(String::as_str), Some("运行" | "同步运行"))
+            })
+    }
+
     pub(crate) fn run_text(&mut self, text: &str) -> c_int {
         let stmt_list = match parse_script(text) {
             Ok(entries) => entries,
@@ -323,7 +331,7 @@ impl Shell {
         self.exec_stmts(&stmt_list).code()
     }
 
-    pub(crate) fn run_pipeline(&mut self, spec: PipelineSpec) -> c_int {
+    pub(crate) fn run_pipeline(&mut self, mut spec: PipelineSpec) -> c_int {
         
         if spec.commands.len() == 1 && !spec.background {
             let program_name = spec.commands[0].program_name();
@@ -335,6 +343,20 @@ impl Shell {
         }
 
         
+        if Self::exec_keyword(&spec) {
+            spec.commands[0].arg_list.remove(0);
+            if spec.commands[0].arg_list.is_empty() {
+                return 0;
+            }
+            return match run_pipeline_ext(&spec) {
+                Ok(status) => status,
+                Err(error) => {
+                    eprintln!("壳语言：{error}");
+                    error.exit_code()
+                }
+            };
+        }
+
         if let Some(builtin) = spec.builtin() {
             let _guard = if spec.redirect.is_set() || spec.redirect.merge_err {
                 match RedirectGuard::apply(&spec.redirect) {
