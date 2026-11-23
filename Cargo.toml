@@ -17,7 +17,7 @@ glob = "0.3"                                      # shell 风格通配匹配（�
 libc = "0.2"                                      # C 库绑定（替代手写 extern）
 rustyline = "17"                                  # 交互行编辑（历史 / 方向键）
 thiserror = "2"                                   # 错误类型派生
-# 注：JSON 读写与值类型序列化已改为手写（源码/模块/值.rs），本 crate 不再依赖 serde
+# JSON 读写与值类型序列化由 源码/主体.rs 手写，本 crate 不依赖 serde
 
 # 最激进优化：全力换运行速度/体积，牺牲编译时间。
 [profile.release]
