@@ -11,7 +11,7 @@
 # 说明：Runner 上的 bash 在赋值语句里只认 ASCII 变量名，所以脚本里的 shell 变量统一用英文，
 # 只有工作流名、job 名、步骤名、输入名称这些「给人看的」文字用中文。
 
-name: 自动发布 Linux 版本
+name: 自动发布
 
 on:
   release:
