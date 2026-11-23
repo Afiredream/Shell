@@ -1,17 +1,17 @@
 # 壳语言 · 壳
 
 一个用 Rust 写的极简 shell，源码数千行（不含测试），
-管道、重定向、后台、控制流、函数、引号、变量、通配符全都自己实现，目录与文件、类型与函数名一律中文。
+管道、重定向、后台、控制流、函数、引号、变量、通配符全都自己实现；Rust 标识符一律英文，关键词与命令是中文。
 编译出来的可执行文件就叫 **`壳`**（`cargo build --release` 后位于 `构建/release/壳`）。
 
 ```text
-$ cargo run
-壳语言 壳 v0.1.0 —— 输入 help 查看用法，Ctrl-D 退出。
-user@host:~$ 回显 你好 | tr -d '\n'; 回显 世界
+$ cat 示例.壳
+回显 你好 | tr -d '\n'; 回显 世界
+ls /不存在的 2>&1 | wc -l
+异步 回显 追加 >> 笔记.txt
+$ 壳 示例.壳
 你好世界
-user@host:~$ ls /不存在的 2>&1 | wc -l
 1
-user@host:~$ 异步 回显 追加 >> 笔记.txt
 [4242] 已放入后台
 ```
 
@@ -95,9 +95,9 @@ AI 编程助手的项目约定见 [`AGENTS.md`](AGENTS.md)；另提供 `CLAUDE.m
 
 ```sh
 cargo build --release          # 产物：构建/release/壳
-cargo test                     # 词法、展开、引号、控制流、函数、值的单元测试（33 项）
+cargo test                     # 词法、展开、引号、控制流、函数、值的单元测试（35 项）
 cargo clippy                   # 静态检查（0 警告）
-cargo run                      # 交互模式（提示符需要真实终端）
+cargo run -- 脚本.壳           # 运行脚本文件
 cargo run -- -c 'ls | wc -l'   # 执行一条命令
 ```
 
@@ -112,21 +112,22 @@ make 安装 安装目录=/别的/目录   # 换安装位置
 
 `make install` / `make uninstall` 是 `make 安装` / `make 卸载` 的英文别名。
 
-## 一个完整的会话示例
+## 一个完整的脚本示例
 
 ```text
-user@host:~/demo$ printf '苹果\n香蕉\n苹果\n' | sort | uniq -c
-      2 苹果
-      1 香蕉
-user@host:~/demo$ ls /nope 2> 错误.txt; 回显 状态=$?
-状态=2
-user@host:~/demo$ X=外层; X=内层 env | grep ^X=
+X=外层
+X=内层 env | grep ^X=
+回显 外层=$X
+touch 甲.rs 乙.rs
+回显 *.rs
+回显 "*.rs"
+```
+
+```text
+$ 壳 demo.壳
 X=内层
-user@host:~/demo$ 回显 外层=$X
 外层=外层
-user@host:~/demo$ touch 甲.rs 乙.rs; 回显 *.rs
 乙.rs 甲.rs
-user@host:~/demo$ 回显 "*.rs"
 *.rs
 ```
 
@@ -136,7 +137,7 @@ user@host:~/demo$ 回显 "*.rs"
 - 不做作业控制：没有 `jobs`/`fg`/`bg`，没有 `&&`、`||`、子 shell。
   控制流用中文的 `如果`/`或者`/`否则`、`对于`、`每当` 实现（块体用缩进，不用 `结束`）；函数用 `函数`/`返回`，都支持嵌套。
 - 后台作业退出后由 init 回收，shell 不打印完成通知（没有 SIGCHLD 处理）。
-- 交互模式用 rustyline 提供行编辑与历史（方向键、历史记录可用）。
+- 没有交互模式：不带参数时打印帮助并返回 2；不提供提示符、行编辑与历史。
 - 展开顺序与 bash 略有不同：`$变量` 展开出来的内容不会再被当作通配符解析；
   一个词里只要出现单引号就整词原样（单引号内 `$` 不展开），双引号内只展开变量。
 
@@ -149,7 +150,6 @@ user@host:~/demo$ 回显 "*.rs"
 | --- | --- | --- |
 | `libc` | MIT / Apache-2.0 | C 库调用（替代手写 `extern "C"`） |
 | `clap` | MIT / Apache-2.0 | 命令行参数解析 |
-| `rustyline` | MIT | 交互行编辑与历史 |
 | `thiserror` | MIT / Apache-2.0 | 错误类型派生 |
 | `dirs` | MIT / Apache-2.0 | 跨平台家目录 |
 | `glob` | MIT / Apache-2.0 | shell 风格通配匹配（替代手写匹配器） |

@@ -15,7 +15,6 @@ clap = { version = "4", features = ["derive"] }   # 命令行参数解析
 dirs = "7"                                        # 跨平台家目录
 glob = "0.3"                                      # shell 风格通配匹配（替代手写）
 libc = "0.2"                                      # C 库绑定（替代手写 extern）
-rustyline = "17"                                  # 交互行编辑（历史 / 方向键）
 thiserror = "2"                                   # 错误类型派生
 # JSON 读写与值类型序列化由 源码/主体.rs 手写，本 crate 不依赖 serde
 

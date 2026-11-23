@@ -61,7 +61,6 @@ const SIGTERM: c_int = libc::SIGTERM;
 const SIGCHLD: c_int = libc::SIGCHLD;
 
 const SIG_DFL: usize = libc::SIG_DFL;
-const SIG_IGN: usize = libc::SIG_IGN;
 
 const WNOHANG: c_int = libc::WNOHANG;
 const WUNTRACED: c_int = libc::WUNTRACED;
@@ -2698,28 +2697,16 @@ fn run_pipeline_ext(spec: &PipelineSpec) -> Result<c_int, ExecError> {
                             sys_close(fd[1]);
                         }
                     }
-                    if let Some(fd) = input_file {
-                        dup_to(STDIN, fd)?;
-                        sys_close(fd);
-                    } else if let Some(fd) = read_pipe {
-                        dup_to(STDIN, fd)?;
-                        sys_close(fd);
+                    if let Some(fd) = input_file.or(read_pipe) {
+                        dup_close(STDIN, fd)?;
                     }
-                    if let Some(fd) = write_pipe {
-                        dup_to(STDOUT, fd)?;
-                        sys_close(fd);
-                    } else if let Some(fd) = output_file {
-                        dup_to(STDOUT, fd)?;
-                        sys_close(fd);
+                    if let Some(fd) = write_pipe.or(output_file) {
+                        dup_close(STDOUT, fd)?;
                     }
-                    if err_to_pipe {
-                        
+                    if err_to_pipe || (err_file.is_none() && spec.redirect.merge_err) {
                         dup_to(STDERR, STDOUT)?;
                     } else if let Some(fd) = err_file {
-                        dup_to(STDERR, fd)?;
-                        sys_close(fd);
-                    } else if spec.redirect.merge_err {
-                        dup_to(STDERR, STDOUT)?;
+                        dup_close(STDERR, fd)?;
                     }
                     Ok(())
                 })()
@@ -2791,7 +2778,7 @@ fn exec_child(commands: &SimpleCmd) -> ! {
         for (key, val) in &commands.env {
             std::env::set_var(key, val);
         }
-        let mut env_table: Vec<(String, String)> = std::env::vars().collect();
+        let mut env_table: HashMap<String, String> = std::env::vars().collect();
         
         let mut empty_dir_stack: Vec<std::path::PathBuf> = Vec::new();
         let mut empty_ret = String::new();
@@ -2802,7 +2789,6 @@ fn exec_child(commands: &SimpleCmd) -> ! {
                 last_status: 0,
                 quit: false,
                 dir_stack: &mut empty_dir_stack,
-                run_script_file: &mut |_| 1,
                 ret_object: &mut empty_ret,
                 stdin_is_pipe: true,
             },
@@ -3008,6 +2994,14 @@ impl Drop for RedirectGuard {
     }
 }
 
+fn dup_close(target: c_int, from_fd: c_int) -> Result<(), ExecError> {
+    if from_fd != target {
+        dup_to(target, from_fd)?;
+        sys_close(from_fd);
+    }
+    Ok(())
+}
+
 fn dup_to(target: c_int, from_fd: c_int) -> Result<(), ExecError> {
     if from_fd == target {
         return Ok(());
@@ -3060,17 +3054,10 @@ fn write_stderr(text: &str) {
 use std::io::{self, Write};
 
 struct Context<'a> {
-    env: &'a mut Vec<(String, String)>,
-    
+    env: &'a mut HashMap<String, String>,
     last_status: c_int,
-    
     quit: bool,
-    
     dir_stack: &'a mut Vec<std::path::PathBuf>,
-    
-    
-    run_script_file: &'a mut dyn FnMut(&str) -> c_int,
-    
     ret_object: &'a mut String,
     
     stdin_is_pipe: bool,
@@ -3079,15 +3066,12 @@ struct Context<'a> {
 impl Context<'_> {
     
     fn set_var(&mut self, name: &str, data: &str) {
-        match self.env.iter_mut().find(|(existing, _)| existing == name) {
-            Some((_, old_value)) => *old_value = data.to_string(),
-            None => self.env.push((name.to_string(), data.to_string())),
-        }
+        self.env.insert(name.to_string(), data.to_string());
         std::env::set_var(name, data);
     }
 
     fn delete_var(&mut self, name: &str) {
-        self.env.retain(|(existing, _)| existing != name);
+        self.env.remove(name);
         std::env::remove_var(name);
     }
 }
@@ -3145,7 +3129,7 @@ impl Builtin {
             Self::EnterDir => Self::run_cd(args),
             Self::PushDir => Self::run_push(args, ctx),
             Self::PopDir => Self::run_pop(ctx),
-            Self::Import => Self::run_import(args, ctx),
+            Self::Import => 1,
             Self::Exit => {
                 ctx.quit = true;
                 let requested_code: Option<c_int> = args.first().and_then(|text| text.parse().ok());
@@ -3262,21 +3246,6 @@ impl Builtin {
     }
 
     
-    fn run_import(args: &[String], ctx: &mut Context) -> c_int {
-        if args.is_empty() {
-            let _ = writeln!(io::stderr(), "导入: 缺少脚本文件名");
-            return 1;
-        }
-        let mut status = 0;
-        for file in args {
-            status = (ctx.run_script_file)(file);
-            if ctx.quit {
-                break;
-            }
-        }
-        status
-    }
-
     
     
     
@@ -3295,7 +3264,7 @@ impl Builtin {
             }
         };
         
-        let read_stdin = ctx.stdin_is_pipe && stdin_readable();
+        let read_stdin = ctx.stdin_is_pipe;
         let orig_text = match file.as_deref() {
             Some(path) => match std::fs::read_to_string(path) {
                 Ok(text) => text,
@@ -3513,8 +3482,8 @@ fn short_path(path: &std::path::Path) -> String {
 }
 
 fn list_vars(ctx: &mut Context) {
-    let mut entries: Vec<&(String, String)> = ctx.env.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut entries: Vec<(&String, &String)> = ctx.env.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
     let mut out = io::stdout().lock();
     for (key, val) in entries {
         let _ = writeln!(out, "{key}={val}");
@@ -3619,9 +3588,9 @@ fn help() {
     println!(
         r##"壳 —— 一个几百行的极简 shell（壳语言）
 
-用法： 壳            进入交互模式
+用法： 壳 脚本 [参数] 运行脚本文件，参数用 $1、$2…… 取到（$0 是脚本名）
        壳 -c "命令"  执行一段命令后退出（可用换行写控制流）
-       壳 脚本 [参数] 运行脚本文件，参数用 $1、$2…… 取到（$0 是脚本名）
+       壳 -h / --help 显示本帮助
 
 语法：
   控制流    如果 条件                              条件退出码 0 为真
@@ -3632,7 +3601,7 @@ fn help() {
   函数      函数 名称 参数...                      定义函数（参数用 $参数名 或 $1 取到）
             返回 [表达式]                           从函数返回；整数/文本/数组/对象均可
             数组 (a b)  对象 {{键=值 ...}}          可嵌套；$返回值 取回文本形式
-            块体用缩进表示：块头下缩进，回退即结束；交互模式下空行结束当前块
+            块体用缩进表示：块头下缩进，回退即结束
   管道      cmd1 | cmd2          把前一个命令的标准输出接到后一个
             cmd1 2>&1 | cmd2     标准错误也一起进入管道（同 |&）
   重定向    cmd > 文件  >> 文件   覆写 / 追加标准输出
@@ -3647,7 +3616,7 @@ fn help() {
             全局变量：$当前目录；脚本内：$脚本路径 $脚本目录
   展开      $(命令)（命令替换，由本 shell 执行，取标准输出；(…) / {{…}} 按数组/对象处理）
             ~/路径、* ? [abc]、# 注释
-  省略号    <文字> 去掉尖括号（echo <x=$x>）；文字以 . 开头时第一个词按实词
+  省略号    <文字> 去掉尖括号（回显 <x=$x>）；文字以 . 开头时第一个词按实词
             「导入」要用「.导入 文件」，才能和管道等符号写在一起
 
 内置命令：
@@ -3670,10 +3639,10 @@ fn help() {
                      不给 --类型：按扩展名写（.json 写 JSON、.ini/.conf 写 INI，其余原样文本）
                      内容可写 $返回值对象；类型不认识或解析失败时不写文件
   正常 / 错误         退出码 0 / 1
-  退出 [码]           退出 shell
+  退出 [码]           立即结束脚本，返回该状态码
 
 启动文件： ~/.壳语言rc 会在启动时逐行执行。
-其它：     Ctrl-C 中断当前行，Ctrl-D 退出。"##
+退出码：  脚本最后一条命令的状态；语法错误为 2。"##
     );
 }
 
@@ -3683,18 +3652,15 @@ mod builtin_tests {
 
     
     fn new_context<'a>(
-        env: &'a mut Vec<(String, String)>,
+        env: &'a mut HashMap<String, String>,
         dir_stack: &'a mut Vec<std::path::PathBuf>,
-        script: &'a mut dyn FnMut(&str) -> c_int,
     ) -> Context<'a> {
-        let return_value = Box::leak(Box::new(String::new()));
         Context {
             env,
             last_status: 0,
             quit: false,
             dir_stack,
-            run_script_file: script,
-            ret_object: return_value,
+            ret_object: Box::leak(Box::new(String::new())),
             stdin_is_pipe: false,
         }
     }
@@ -3706,19 +3672,18 @@ mod builtin_tests {
         let src = root.join("源.json");
         let out_path = root.join("出.ini");
         std::fs::write(&src, r#"{"名称":"壳","端口":8080}"#).unwrap();
-        let mut env: Vec<(String, String)> = Vec::new();
+        let mut env: HashMap<String, String> = HashMap::new();
         let mut dir_stack: Vec<std::path::PathBuf> = Vec::new();
-        let mut script = |_: &str| 0;
 
         {
             let args = vec![src.display().to_string()];
-            let mut ctx = new_context(&mut env, &mut dir_stack, &mut script);
+            let mut ctx = new_context(&mut env, &mut dir_stack);
             assert_eq!(Builtin::ReadFile.run(&args, &mut ctx), 0);
             assert_eq!(*ctx.ret_object, "{名称=壳 端口=8080}");
         }
         {
             let args = vec![out_path.display().to_string(), "{名称=壳 端口=8080}".into()];
-            let mut ctx = new_context(&mut env, &mut dir_stack, &mut script);
+            let mut ctx = new_context(&mut env, &mut dir_stack);
             assert_eq!(Builtin::WriteFile.run(&args, &mut ctx), 0);
             let written = std::fs::read_to_string(&out_path).unwrap();
             assert!(written.contains("[全局]"));
@@ -3727,13 +3692,13 @@ mod builtin_tests {
         {
             let orig_text = std::fs::read_to_string(&src).unwrap();
             let args = vec![src.display().to_string(), "--类型".into(), "文本".into()];
-            let mut ctx = new_context(&mut env, &mut dir_stack, &mut script);
+            let mut ctx = new_context(&mut env, &mut dir_stack);
             assert_eq!(Builtin::ReadFile.run(&args, &mut ctx), 0);
             assert_eq!(*ctx.ret_object, orig_text);
         }
         {
             let args = vec![src.display().to_string(), "--类型".into(), "不认识".into()];
-            let mut ctx = new_context(&mut env, &mut dir_stack, &mut script);
+            let mut ctx = new_context(&mut env, &mut dir_stack);
             assert_eq!(Builtin::ReadFile.run(&args, &mut ctx), 1);
             assert!(ctx.ret_object.is_empty());
         }
@@ -3741,13 +3706,13 @@ mod builtin_tests {
             
             let bad_path = root.join("坏.ini");
             let args = vec![bad_path.display().to_string(), "--类型".into(), "XML".into()];
-            let mut ctx = new_context(&mut env, &mut dir_stack, &mut script);
+            let mut ctx = new_context(&mut env, &mut dir_stack);
             assert_eq!(Builtin::WriteFile.run(&args, &mut ctx), 1);
             assert!(!bad_path.exists());
         }
         {
             
-            let mut ctx = new_context(&mut env, &mut dir_stack, &mut script);
+            let mut ctx = new_context(&mut env, &mut dir_stack);
             assert_eq!(Builtin::ReadFile.run(&[], &mut ctx), 1);
         }
         let _ = std::fs::remove_dir_all(&root);
@@ -3755,53 +3720,52 @@ mod builtin_tests {
 
     #[test]
     fn env_list_and_set() {
-        let mut env: Vec<(String, String)> =
-            vec![("乙".into(), "2".into()), ("甲".into(), "1".into())];
+        let mut env: HashMap<String, String> =
+            [("乙".to_string(), "2".to_string()), ("甲".to_string(), "1".to_string())]
+                .into_iter()
+                .collect();
         let commands = Builtin::Export;
         
         assert_eq!(
-            commands.run(&[], &mut new_context(&mut env, &mut Vec::new(), &mut |_| 0)),
+            commands.run(&[], &mut new_context(&mut env, &mut Vec::new())),
             0
         );
         
         let args = vec!["甲=覆盖".to_string(), "丙=新".to_string()];
         assert_eq!(
-            commands.run(&args, &mut new_context(&mut env, &mut Vec::new(), &mut |_| 0)),
+            commands.run(&args, &mut new_context(&mut env, &mut Vec::new())),
             0
         );
-        assert_eq!(env.iter().find(|(key, _)| key == "甲").unwrap().1, "覆盖");
-        assert_eq!(env.iter().find(|(key, _)| key == "丙").unwrap().1, "新");
+        assert_eq!(env.get("甲").map(String::as_str), Some("覆盖"));
+        assert_eq!(env.get("丙").map(String::as_str), Some("新"));
         
         let args = vec!["带空格的=你好 世界".to_string()];
         assert_eq!(
-            commands.run(&args, &mut new_context(&mut env, &mut Vec::new(), &mut |_| 0)),
+            commands.run(&args, &mut new_context(&mut env, &mut Vec::new())),
             0
         );
-        assert_eq!(
-            env.iter().find(|(key, _)| key == "带空格的").unwrap().1,
-            "你好 世界"
-        );
+        assert_eq!(env.get("带空格的").map(String::as_str), Some("你好 世界"));
         
         assert_eq!(
             commands.run(
                 &["甲=".to_string()],
-                &mut new_context(&mut env, &mut Vec::new(), &mut |_| 0)
+                &mut new_context(&mut env, &mut Vec::new())
             ),
             0
         );
-        assert!(env.iter().all(|(key, _)| key != "甲"));
+        assert!(!env.contains_key("甲"));
         
         assert_eq!(
             commands.run(
                 &["没有等号".to_string()],
-                &mut new_context(&mut env, &mut Vec::new(), &mut |_| 0)
+                &mut new_context(&mut env, &mut Vec::new())
             ),
             1
         );
         assert_eq!(
             commands.run(
                 &["1坏名=x".to_string()],
-                &mut new_context(&mut env, &mut Vec::new(), &mut |_| 0)
+                &mut new_context(&mut env, &mut Vec::new())
             ),
             1
         );
@@ -3812,9 +3776,9 @@ mod builtin_tests {
         
         let commands = Builtin::Export;
         let args = vec!["跨进程名字=壳语言".to_string()];
-        let mut env: Vec<(String, String)> = Vec::new();
+        let mut env: HashMap<String, String> = HashMap::new();
         assert_eq!(
-            commands.run(&args, &mut new_context(&mut env, &mut Vec::new(), &mut |_| 0)),
+            commands.run(&args, &mut new_context(&mut env, &mut Vec::new())),
             0
         );
         let child = std::process::Command::new("sh")
@@ -3834,13 +3798,12 @@ mod builtin_tests {
     fn dir_stack_push_pop() {
         let orig = std::env::current_dir().unwrap();
         let tmp_path = std::env::temp_dir();
-        let mut env: Vec<(String, String)> = Vec::new();
+        let mut env: HashMap<String, String> = HashMap::new();
         let mut dir_stack: Vec<std::path::PathBuf> = Vec::new();
-        let mut script = |_: &str| 0;
         let args = vec![tmp_path.display().to_string()];
 
         assert_eq!(
-            Builtin::PushDir.run(&args, &mut new_context(&mut env, &mut dir_stack, &mut script)),
+            Builtin::PushDir.run(&args, &mut new_context(&mut env, &mut dir_stack)),
             0
         );
         assert_eq!(std::env::current_dir().unwrap(), tmp_path);
@@ -3848,14 +3811,14 @@ mod builtin_tests {
 
         
         assert_eq!(
-            Builtin::PushDir.run(&[], &mut new_context(&mut env, &mut dir_stack, &mut script)),
+            Builtin::PushDir.run(&[], &mut new_context(&mut env, &mut dir_stack)),
             0
         );
         assert_eq!(std::env::current_dir().unwrap(), orig);
         assert_eq!(dir_stack, vec![tmp_path.clone()]);
 
         assert_eq!(
-            Builtin::PopDir.run(&[], &mut new_context(&mut env, &mut dir_stack, &mut script)),
+            Builtin::PopDir.run(&[], &mut new_context(&mut env, &mut dir_stack)),
             0
         );
         assert_eq!(std::env::current_dir().unwrap(), tmp_path);
@@ -3863,13 +3826,13 @@ mod builtin_tests {
 
         
         assert_eq!(
-            Builtin::PopDir.run(&[], &mut new_context(&mut env, &mut dir_stack, &mut script)),
+            Builtin::PopDir.run(&[], &mut new_context(&mut env, &mut dir_stack)),
             1
         );
         assert_eq!(
             Builtin::PushDir.run(
                 &["/不存在的目录".into()],
-                &mut new_context(&mut env, &mut dir_stack, &mut script)
+                &mut new_context(&mut env, &mut dir_stack)
             ),
             1
         );
@@ -3881,25 +3844,24 @@ mod builtin_tests {
 
     #[test]
     fn import_each_line() {
-        let mut env: Vec<(String, String)> = Vec::new();
-        let mut dir_stack: Vec<std::path::PathBuf> = Vec::new();
-        let mut executed: Vec<String> = Vec::new();
-        {
-            let mut script = |file: &str| {
-                executed.push(file.to_string());
-                0
-            };
-            let args = vec!["一.壳".to_string(), "二.壳".to_string()];
-            assert_eq!(
-                Builtin::Import.run(&args, &mut new_context(&mut env, &mut dir_stack, &mut script)),
-                0
-            );
-        }
-        assert_eq!(executed, vec!["一.壳", "二.壳"]);
+        let root = std::env::temp_dir().join("壳导入测试");
+        let _ = std::fs::create_dir_all(&root);
+        let first = root.join("一.壳");
+        let second = root.join("二.壳");
+        std::fs::write(&first, "导入甲=一\n").unwrap();
+        std::fs::write(&second, "导入乙=二\n").unwrap();
+        let mut shell = Shell::new();
         assert_eq!(
-            Builtin::Import.run(&[], &mut new_context(&mut env, &mut dir_stack, &mut |_| 0)),
-            1
+            shell.import_files(&[
+                first.display().to_string(),
+                second.display().to_string()
+            ]),
+            0
         );
+        assert_eq!(shell.variables.get("导入甲").map(String::as_str), Some("一"));
+        assert_eq!(shell.variables.get("导入乙").map(String::as_str), Some("二"));
+        assert_eq!(shell.import_files(&[]), 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -3922,11 +3884,15 @@ enum Flow {
     Return(c_int),
 }
 
-enum RunFeedback {
-    Done(c_int),
-    Continue,
+impl Flow {
+    fn code(self) -> c_int {
+        match self {
+            Flow::Normal(code) | Flow::Break(code) | Flow::Continue(code) | Flow::Return(code) => code,
+        }
+    }
 }
 
+#[derive(Clone)]
 struct Shell {
     variables: HashMap<String, String>,
     
@@ -3936,7 +3902,6 @@ struct Shell {
     
     exit_code: c_int,
     
-    block_buffer: Vec<String>,
     
     functions: HashMap<String, (Vec<String>, Vec<Stmt>)>,
     
@@ -3959,7 +3924,6 @@ impl Shell {
             last_status: 0,
             quit: false,
             exit_code: 0,
-            block_buffer: Vec::new(),
             functions: HashMap::new(),
             return_value: Value::Int(0),
             ret_object: String::new(),
@@ -4016,17 +3980,11 @@ impl Shell {
         self.variables.insert("脚本目录".into(), dir);
 
         let result = self.exec_stmts(&stmt_list);
-        
-        self.variables.extend(std::env::vars());
 
         restore_var(&mut self.variables, "脚本路径", saved_path);
         restore_var(&mut self.variables, "脚本目录", saved_dir);
 
-        match result {
-            Flow::Normal(code) => code,
-            
-            Flow::Break(code) | Flow::Continue(code) | Flow::Return(code) => code,
-        }
+        result.code()
     }
 
     
@@ -4038,31 +3996,7 @@ impl Shell {
         }
     }
 
-    fn greet(&self) {
-        println!(
-            "壳 v{}（壳语言）—— 输入 help 查看用法，Ctrl-D 退出。",
-            env!("CARGO_PKG_VERSION")
-        );
-    }
-
     
-    fn prompt(&self) -> String {
-        let user = self
-            .variables
-            .get("USER")
-            .or_else(|| self.variables.get("LOGNAME"))
-            .cloned()
-            .unwrap_or_else(|| "?".into());
-        let host = std::fs::read_to_string("/etc/hostname")
-            .map(|text| text.trim().to_string())
-            .ok()
-            .filter(|text| !text.is_empty())
-            .or_else(|| self.variables.get("HOSTNAME").cloned())
-            .unwrap_or_else(|| "localhost".into());
-        let symbol = if self.last_status == 0 { "$" } else { "#" };
-        format!("{user}@{host}:{}{symbol} ", short_dir())
-    }
-
     
     
     
@@ -4075,23 +4009,17 @@ impl Shell {
             }
             
             
-            let this_proc = std::sync::Arc::new(std::sync::Mutex::new(Kernel {
-                shell: self.clone_shell(),
-                changed: false,
-            }));
+            let kernel = std::cell::RefCell::new(None);
             let plan_result = {
                 let planner = Planner {
                     env_table: &self.variables,
                     last_status: self.last_status,
-                    cmdsub: &|commands, lookup| Self::capture_cmd(&this_proc, commands, lookup),
+                    cmdsub: &|commands, lookup| self.run_cmdsub(&kernel, commands, lookup),
                 };
                 planner.plan(job)
             };
-            let kernel_lock = std::sync::Arc::try_unwrap(this_proc).ok().and_then(|lock| lock.into_inner().ok());
-            if let Some(kernel) = kernel_lock {
-                if kernel.changed {
-                    self.adopt(kernel.shell);
-                }
+            if let Some(shell) = kernel.into_inner() {
+                self.adopt(shell);
             }
             match plan_result {
                 Err(message_s) => {
@@ -4117,38 +4045,25 @@ impl Shell {
     }
 
     
-    fn clone_shell(&self) -> Shell {
-        Shell {
-            variables: self.variables.clone(),
-            dir_stack: self.dir_stack.clone(),
-            last_status: self.last_status,
-            quit: false,
-            exit_code: 0,
-            block_buffer: Vec::new(),
-            functions: self.functions.clone(),
-            return_value: self.return_value.clone(),
-            ret_object: self.ret_object.clone(),
-        }
+    fn kernel_shell(&self) -> Shell {
+        let mut shell = self.clone();
+        shell.quit = false;
+        shell.exit_code = 0;
+        shell
     }
 
     
-    fn capture_cmd(
-        owner: &std::sync::Arc<std::sync::Mutex<Kernel>>,
+    fn run_cmdsub(
+        &self,
+        slot: &std::cell::RefCell<Option<Shell>>,
         commands: &str,
         lookup: &dyn Fn(&str) -> Option<String>,
     ) -> String {
-        let expanded_cmd = expand_cmd_text(commands, lookup);
-        let Ok(mut lock) = owner.lock() else {
-            return String::new();
-        };
-        lock.capture_output(&expanded_cmd)
+        let text = expand_cmd_text(commands, lookup);
+        slot.borrow_mut().get_or_insert_with(|| self.kernel_shell()).capture_output(&text)
     }
 
-    
     fn adopt(&mut self, kernel: Shell) {
-        if kernel.variables == self.variables {
-            return;
-        }
         self.variables = kernel.variables;
     }
 
@@ -4265,44 +4180,6 @@ impl Shell {
     }
 
     
-    fn feed_line(&mut self, line: &str) -> RunFeedback {
-        if line.trim().is_empty() {
-            if self.block_buffer.is_empty() {
-                return RunFeedback::Done(0);
-            }
-            let text = std::mem::take(&mut self.block_buffer).join("\n");
-            return self.run_buffer(&text);
-        }
-        let multi_line = {
-            let first_line = self.block_buffer.first().map(String::as_str).unwrap_or(line);
-            let first_word = first_line.split_whitespace().next().unwrap_or("");
-            matches!(first_word, "如果" | "或者" | "否则" | "对于" | "每当" | "函数")
-        };
-        self.block_buffer.push(line.to_string());
-        if multi_line {
-            RunFeedback::Continue
-        } else {
-            let text = std::mem::take(&mut self.block_buffer).join("\n");
-            self.run_buffer(&text)
-        }
-    }
-
-    fn run_buffer(&mut self, text: &str) -> RunFeedback {
-        match parse_script(text) {
-            Ok(stmt_list) => {
-                let status = match self.exec_stmts(&stmt_list) {
-                    Flow::Normal(code) => code,
-                    Flow::Break(code) | Flow::Continue(code) | Flow::Return(code) => code,
-                };
-                RunFeedback::Done(status)
-            }
-            Err(error) => {
-                eprintln!("语法错误：{error}");
-                RunFeedback::Done(2)
-            }
-        }
-    }
-
     
     fn run_text(&mut self, text: &str) -> c_int {
         let stmt_list = match parse_script(text) {
@@ -4312,10 +4189,7 @@ impl Shell {
                 return 2;
             }
         };
-        match self.exec_stmts(&stmt_list) {
-            Flow::Normal(code) => code,
-            Flow::Break(code) | Flow::Continue(code) | Flow::Return(code) => code,
-        }
+        self.exec_stmts(&stmt_list).code()
     }
 
     fn run_pipeline(&mut self, spec: PipelineSpec) -> c_int {
@@ -4342,72 +4216,32 @@ impl Shell {
             } else {
                 None
             };
-            
-            
-            if matches!(
-                builtin,
-                Builtin::Echo
-                    | Builtin::Print
-                    | Builtin::Exec
-                    | Builtin::HelpCmd
-                    | Builtin::True
-                    | Builtin::False
-            ) {
-                let mut empty_env: Vec<(String, String)> = Vec::new();
-                let mut empty_stack: Vec<std::path::PathBuf> = Vec::new();
-                
-                let mut ret_object = std::mem::take(&mut self.ret_object);
-                let status = {
-                    let this = &mut *self;
-                    let mut ctx = Context {
-                        env: &mut empty_env,
-                        last_status: this.last_status,
-                        quit: false,
-                        dir_stack: &mut empty_stack,
-                        run_script_file: &mut |file| this.run_script_file(file),
-                        stdin_is_pipe: spec.commands.len() > 1 || spec.input_from_file || stdin_readable(),
-                        ret_object: &mut ret_object,
-                    };
-                    let args = &spec.commands[0].arg_list[1..];
-                    let status = builtin.run(args, &mut ctx);
-                    if ctx.quit {
-                        this.quit = true;
-                        this.exit_code = status;
-                    }
-                    status
-                };
-                self.ret_object = ret_object;
-                self.sync_return_vars();
-                return status;
+            let args = &spec.commands[0].arg_list[1..];
+            if matches!(builtin, Builtin::Import) {
+                return self.import_files(args);
             }
-
-            let mut env_table = self.snapshot_vars();
-            let mut dir_stack = std::mem::take(&mut self.dir_stack);
-            let mut ret_object = std::mem::take(&mut self.ret_object);
-            let status;
-            {
-                
-                let this = &mut *self;
+            let status = {
                 let mut ctx = Context {
-                    env: &mut env_table,
-                    last_status: this.last_status,
+                    env: &mut self.variables,
+                    last_status: self.last_status,
                     quit: false,
-                    dir_stack: &mut dir_stack,
-                    run_script_file: &mut |file| this.run_script_file(file),
-                    stdin_is_pipe: spec.commands.len() > 1 || spec.input_from_file || stdin_readable(),
-                    ret_object: &mut ret_object,
+                    dir_stack: &mut self.dir_stack,
+                    ret_object: &mut self.ret_object,
+                    stdin_is_pipe: matches!(builtin, Builtin::ReadFile)
+                        && (spec.commands.len() > 1
+                            || spec.input_from_file
+                            || stdin_readable()),
                 };
-                let args = &spec.commands[0].arg_list[1..];
-                status = builtin.run(args, &mut ctx);
+                let status = builtin.run(args, &mut ctx);
                 if ctx.quit {
-                    this.quit = true;
-                    this.exit_code = status;
+                    self.quit = true;
+                    self.exit_code = status;
                 }
+                status
+            };
+            if matches!(builtin, Builtin::ReadFile) {
+                self.sync_return_vars();
             }
-            self.dir_stack = dir_stack;
-            self.ret_object = ret_object;
-            self.variables = self.merge_builtin(env_table);
-            self.sync_return_vars();
             return status;
         }
 
@@ -4469,12 +4303,7 @@ impl Shell {
             self.variables.insert((idx + 1).to_string(), value.clone());
         }
 
-        let result = self.exec_stmts(body);
-        let code = match result {
-            Flow::Normal(code) | Flow::Return(code) => code,
-            
-            Flow::Break(code) | Flow::Continue(code) => code,
-        };
+        let code = self.exec_stmts(body).code();
 
         self.restore_positional(saved_positional);
         for (entry_name, raw) in saved_named {
@@ -4512,18 +4341,19 @@ impl Shell {
         }
     }
 
-    
-    
-    
-    
-    
-    fn merge_builtin(&self, old_table: Vec<(String, String)>) -> HashMap<String, String> {
-        let proc_env: HashMap<String, String> = std::env::vars().collect();
-        let mut result: HashMap<String, String> = old_table.into_iter().collect();
-        for (key, val) in proc_env {
-            result.insert(key, val);
+    fn import_files(&mut self, args: &[String]) -> c_int {
+        if args.is_empty() {
+            let _ = writeln!(io::stderr(), "导入: 缺少脚本文件名");
+            return 1;
         }
-        result
+        let mut status = 0;
+        for file in args {
+            status = self.run_script_file(file);
+            if self.quit {
+                break;
+            }
+        }
+        status
     }
 
     
@@ -4544,27 +4374,10 @@ impl Shell {
         }
     }
 
-    fn snapshot_vars(&self) -> Vec<(String, String)> {
-        self.variables
-            .iter()
-            .map(|(key, val)| (key.clone(), val.clone()))
-            .collect()
-    }
 }
 
-struct Kernel {
-    shell: Shell,
-    changed: bool,
-}
-
-impl Kernel {
-    
-    
-    
-    
-    
+impl Shell {
     fn capture_output(&mut self, commands: &str) -> String {
-        self.changed = true;
         let stmt_list = match parse_script(commands) {
             Ok(entries) => entries,
             Err(error) => {
@@ -4579,9 +4392,9 @@ impl Kernel {
                 return String::new();
             }
         };
-        let result = self.shell.exec_stmts(&stmt_list);
+        let result = self.exec_stmts(&stmt_list);
         let out = capture.take();
-        self.shell.last_status = code(result);
+        self.last_status = result.code();
         let orig_text = String::from_utf8_lossy(&out).trim_end_matches('\n').to_string();
         
         
@@ -4589,12 +4402,6 @@ impl Kernel {
             Some(restored) => restored.to_text(),
             None => orig_text,
         }
-    }
-}
-
-fn code(result: Flow) -> c_int {
-    match result {
-        Flow::Normal(code) | Flow::Break(code) | Flow::Continue(code) | Flow::Return(code) => code,
     }
 }
 
@@ -4608,24 +4415,6 @@ fn restore_var(variables: &mut HashMap<String, String>, var_name: &str, raw: Opt
         }
     }
     std::env::remove_var(var_name);
-}
-
-fn short_dir() -> String {
-    let home_dir = dirs::home_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    let cwd = std::env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "?".into());
-    if !home_dir.is_empty() {
-        if cwd == home_dir {
-            return "~".into();
-        }
-        if let Some(rest) = cwd.strip_prefix(&format!("{home_dir}/")) {
-            return format!("~/{rest}");
-        }
-    }
-    cwd
 }
 
 fn expand_cmd_text(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
@@ -4689,11 +4478,7 @@ fn empty_cmdsub(_cmd: &str, _lookup: &dyn Fn(&str) -> Option<String>) -> String 
     String::new()
 }
 
-use std::io::{BufRead, IsTerminal};
-
 use clap::Parser;
-use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
 
 #[derive(Parser)]
 #[command(
@@ -4703,7 +4488,7 @@ use rustyline::DefaultEditor;
     disable_help_flag = true
 )]
 struct Cli {
-    #[arg(short = 'c', value_name = "命令")]
+    #[arg(short = 'c', value_name = "命令", conflicts_with = "script")]
     command: Option<String>,
 
     #[arg(short = 'h', long = "help", action = clap::ArgAction::SetTrue)]
@@ -4712,7 +4497,7 @@ struct Cli {
     #[arg(value_name = "脚本")]
     script: Option<String>,
 
-    #[arg(value_name = "参数", trailing_var_arg = true)]
+    #[arg(value_name = "参数", trailing_var_arg = true, requires = "script")]
     script_args: Vec<String>,
 }
 
@@ -4735,101 +4520,17 @@ fn main() {
         });
     }
 
-    if let Some(script_file) = args.script {
-        shell.load_rc();
-        shell.set_positional(&script_file, &args.script_args);
-        let status = shell.run_script_file(&script_file);
-        std::process::exit(if shell.quit {
-            shell.exit_code
-        } else {
-            status
-        });
-    }
-
-    shell.greet();
-    shell.load_rc();
-
-    sys_signal(SIGINT, SIG_IGN);
-    sys_signal(SIGTERM, SIG_IGN);
-
-    let is_tty = std::io::stdin().is_terminal();
-    let mut editor = if is_tty {
-        match DefaultEditor::new() {
-            Ok(editor) => Some(editor),
-            Err(error) => {
-                eprintln!("editor init failed: {error}");
-                None
-            }
-        }
-    } else {
-        None
+    let Some(script_file) = args.script else {
+        help();
+        std::process::exit(2);
     };
 
-    let stdin = std::io::stdin();
-    let mut reader = stdin.lock();
-    let mut line_buf = String::new();
-    let mut continued = false;
-
-    loop {
-        let line = if let Some(editor) = editor.as_mut() {
-            let prompt = if continued {
-                "> ".to_string()
-            } else {
-                shell.prompt()
-            };
-            match editor.readline(&prompt) {
-                Ok(line) => {
-                    let _ = editor.add_history_entry(&line);
-                    line
-                }
-                Err(ReadlineError::Interrupted) => {
-                    shell.block_buffer.clear();
-                    continued = false;
-                    shell.last_status = 130;
-                    continue;
-                }
-                Err(ReadlineError::Eof) => break,
-                Err(error) => {
-                    eprintln!("read failed: {error}");
-                    break;
-                }
-            }
-        } else {
-            line_buf.clear();
-            match reader.read_line(&mut line_buf) {
-                Ok(0) => break,
-                Ok(_) => line_buf.clone(),
-                Err(error) => {
-                    eprintln!("read failed: {error}");
-                    break;
-                }
-            }
-        };
-
-        match shell.feed_line(&line) {
-            RunFeedback::Done(code) => {
-                shell.last_status = code;
-                continued = false;
-            }
-            RunFeedback::Continue => continued = true,
-        }
-        if shell.quit {
-            break;
-        }
-    }
-
-    if !shell.block_buffer.is_empty() {
-        if let RunFeedback::Done(code) = shell.feed_line("") {
-            shell.last_status = code;
-        }
-    }
-
-    if is_tty {
-        println!("bye.");
-    }
+    shell.load_rc();
+    shell.set_positional(&script_file, &args.script_args);
+    let status = shell.run_script_file(&script_file);
     std::process::exit(if shell.quit {
         shell.exit_code
     } else {
-        shell.last_status
+        status
     });
 }
