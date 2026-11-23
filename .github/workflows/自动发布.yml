@@ -6,7 +6,7 @@
 #
 # 版本号一律从 Cargo.toml 读取，发布标签为 v<版本号>；不需要也不能手工填写。
 #
-# 产物：壳-<版本>-<架构>.tar.gz 与同名 .sha256，里面是可执行文件「壳」和 README、LICENSE。
+# 产物：单个可执行文件 shell-<版本>-linux-x86_64 与同名 .sha256（不打包）。只发布 x86_64。
 #
 # 说明：Runner 上的 bash 在赋值语句里只认 ASCII 变量名，所以脚本里的 shell 变量统一用英文，
 # 只有工作流名、job 名、步骤名、输入名称这些「给人看的」文字用中文。
@@ -66,79 +66,48 @@ jobs:
           fi
 
   build:
-    name: 编译 ${{ matrix.target }}（${{ matrix.arch }}）
+    name: 编译 Linux x86_64 可执行文件
     needs: prepare
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            arch: x86_64
-            linker: gcc
-          - target: aarch64-unknown-linux-gnu
-            arch: aarch64
-            linker: aarch64-linux-gnu-gcc
+    outputs:
+      binary: ${{ steps.pack.outputs.binary }}
+      checksum: ${{ steps.pack.outputs.checksum }}
     steps:
       - uses: actions/checkout@v4
 
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: 安装交叉编译链接器与目标系统库
-        # 只装 gcc-aarch64-linux-gnu 不够：它依赖的 libc6-dev-arm64-cross 提供
-        # Scrt1.o、crti.o、libc.so 这些启动文件，CI 上默认不会装上，链接会报
-        # "cannot find Scrt1.o"。这里显式安装完整工具链。
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ matrix.arch == 'aarch64' && 'gcc-aarch64-linux-gnu libc6-dev-arm64-cross binutils-aarch64-linux-gnu' || 'gcc libc6-dev' }}
-          if [ "${{ matrix.arch }}" = "aarch64" ]; then
-            echo "— 确认启动文件存在："
-            aarch64-linux-gnu-gcc -print-file-name=Scrt1.o
-            aarch64-linux-gnu-gcc -print-file-name=crti.o
-            test -e "$(aarch64-linux-gnu-gcc -print-file-name=Scrt1.o)" || { echo "::error::缺少 Scrt1.o"; exit 1; }
-          fi
 
       - name: 缓存依赖
         uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
 
       - name: 编译
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
         run: |
-          cargo build --release --locked --target ${{ matrix.target }}
+          cargo build --release --locked
           # 产物目录由 .cargo/config.toml 指定为「构建」
-          test -x "构建/${{ matrix.target }}/release/壳" && ls -l "构建/${{ matrix.target }}/release/壳"
+          test -x "构建/release/壳" && ls -l "构建/release/壳"
 
-      - name: 打包
+      - name: 准备发布文件（单个可执行文件，不压缩）
         id: pack
         shell: bash
         run: |
           set -euo pipefail
           version="${{ needs.prepare.outputs.version }}"
-          name="壳-${version}-${{ matrix.arch }}"
-          mkdir -p dist/"$name"
-          cp "构建/${{ matrix.target }}/release/壳" dist/"$name"/
-          cp README.md LICENSE dist/"$name"/
-          chmod +x dist/"$name"/壳
-          tar -C dist -czf "$name.tar.gz" "$name"
-          # 顺带留下 SHA256，方便下载者校验
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
-          echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
-          echo "checksum=$name.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          # 上传文件名只用 ASCII，下载者用 curl/wget 时不必处理中文名；程序本身仍叫「壳」
+          name="shell-${version}-linux-x86_64"
+          mkdir -p dist
+          install -m 755 "构建/release/壳" "dist/$name"
+          sha256sum "dist/$name" > "dist/$name.sha256"
+          echo "binary=$name" >> "$GITHUB_OUTPUT"
+          echo "checksum=$name.sha256" >> "$GITHUB_OUTPUT"
+          ls -l dist/
 
-      - name: 本架构自检（x86_64 运行器能够执行）
-        if: matrix.arch == 'x86_64'
+      - name: 自检
         shell: bash
         run: |
           set -euo pipefail
-          tar -xzf "${{ steps.pack.outputs.archive }}" -C .
-          "./壳-${{ needs.prepare.outputs.version }}-${{ matrix.arch }}/壳" -c 'echo 自检通过 | tr a-z A-Z'
-          "./壳-${{ needs.prepare.outputs.version }}-${{ matrix.arch }}/壳" -h | head -n1
+          "./dist/${{ steps.pack.outputs.binary }}" -c 'echo 自检通过 | tr a-z A-Z'
+          "./dist/${{ steps.pack.outputs.binary }}" -h | head -n1
 
       - name: 上传到本次 Release
         if: github.event_name == 'release'
@@ -147,27 +116,25 @@ jobs:
           # 直接用当前 Release 的标签，保证文件挂到触发它的那个 Release 上
           tag_name: ${{ github.event.release.tag_name }}
           files: |
-            ${{ steps.pack.outputs.archive }}
-            ${{ steps.pack.outputs.checksum }}
-          fail_on_unmatched_files: false
+            dist/${{ steps.pack.outputs.binary }}
+            dist/${{ steps.pack.outputs.checksum }}
+          fail_on_unmatched_files: true
 
       - name: 保存为工作流产物
         uses: actions/upload-artifact@v4
         with:
-          name: 壳-${{ matrix.arch }}
-          path: |
-            ${{ steps.pack.outputs.archive }}
-            ${{ steps.pack.outputs.checksum }}
+          name: 壳-linux-x86_64
+          path: dist/
           if-no-files-found: error
 
-  # 手动触发时：把两个架构的包挂到 Release 上（标签还没有 Release 就创建；已有则追加/覆盖同名文件）
+  # 手动触发时：把可执行文件挂到 Release 上（标签还没有 Release 就创建；已有则追加/覆盖同名文件）
   publish:
     name: 发布到 GitHub Release
     needs: [prepare, build]
     if: github.event_name == 'workflow_dispatch' && inputs.create_release
     runs-on: ubuntu-latest
     steps:
-      - name: 下载构建好的压缩包
+      - name: 下载构建好的文件
         uses: actions/download-artifact@v4
         with:
           path: dist
@@ -182,5 +149,6 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            dist/*.tar.gz
+            dist/shell-*
+
             dist/*.sha256

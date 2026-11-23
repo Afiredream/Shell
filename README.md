@@ -162,23 +162,27 @@ with this program.  If not, see <https://www.gnu.org/licenses/>.
 [`.github/workflows/自动发布.yml`](.github/workflows/自动发布.yml) 负责编译 Linux 版本：
 
 - **发布 Release 时自动触发**：在 GitHub 上发布（Publish，草稿转正式）一个 Release 后，
-  工作流自动编译并把安装包附加到该 Release；
+  工作流自动编译并把可执行文件附加到该 Release；
 - **版本号一律读取 `Cargo.toml`**：自动与手动触发都一样，发布标签为 `v<版本号>`，无需手工填写；
   发版只需改 `Cargo.toml` 里的 `version`；
 - **可手动触发**：Actions →「自动发布 Linux 版本」→ Run workflow，只需在 `create_release` 勾选框里选择是否顺手创建（或更新）对应的 Release；
-- 每次都会产出两个架构：`壳-<版本>-x86_64.tar.gz`（x86_64-unknown-linux-gnu）与
-  `壳-<版本>-aarch64.tar.gz`（aarch64-unknown-linux-gnu，交叉编译），并附 `.sha256` 校验文件；
-- x86_64 的包会在运行器上实际跑一遍（`-c` 与 `-h`）作为自检；
+- 只发布 **x86_64 的单个可执行文件**，不打包压缩：
+  `shell-<版本>-linux-x86_64` 与同名 `.sha256`（文件名用 ASCII，便于 `curl`/`wget` 直接下载；程序本身仍叫「壳」）；
+- 编译出的可执行文件会在运行器上实际跑一遍（`-c` 与 `-h`）作为自检；
 - 手动触发时选「不创建 Release」，产物只保留在 Actions 运行页的 Artifacts 里，适合先试构建。
 
 > 注：工作流脚本里的 shell 变量一律用英文名。Runner 上的 bash 只认 ASCII 变量名，
 > 写成中文会变成「命令未找到」；工作流名、任务名、步骤名与输入名称则是中文。
 
-下载后安装：
+下载后安装（重命名为「壳」）：
 
 ```sh
-tar -xzf 壳-0.1.0-x86_64.tar.gz
-sudo install -m 755 壳-0.1.0-x86_64/壳 /usr/local/bin/壳
+# 0.1.0 换成实际版本号
+base=https://github.com/Afiredream/Shell/releases/download/v0.1.0
+curl -fLO "$base/shell-0.1.0-linux-x86_64"
+curl -fsLO "$base/shell-0.1.0-linux-x86_64.sha256"
+sha256sum -c shell-0.1.0-linux-x86_64.sha256
+sudo install -m 755 shell-0.1.0-linux-x86_64 /usr/local/bin/壳
 壳 -c 'echo 你好 | tr a-z A-Z'
 ```
 
